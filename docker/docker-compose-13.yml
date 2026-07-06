@@ -1,3 +1,10 @@
+# 13-node chain topology (BITSWAP_FLOOD_FORWARD=1):
+#
+#   bench(host) ──► peer1 ──► peer2 ──► ... ──► peer10 ──► {owner, cache}
+#
+# Every peer connects ONLY to its next chain hop. peer10 fans out to both
+# owner and cache so cache-role operations reach the cache node.
+
 services:
   owner:
     build:
@@ -7,6 +14,7 @@ services:
       - ROLE=owner
       - PORT=4001
       - ANNOUNCE_IP=owner
+      - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4001:4001"
     volumes:
@@ -22,6 +30,7 @@ services:
       - ANNOUNCE_IP=cache
       - OWNER_HOST=owner
       - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4002:4002"
     volumes:
@@ -39,6 +48,7 @@ services:
       - ANNOUNCE_IP=requester
       - CACHE_HOST=cache
       - CACHE_PORT=4002
+      - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4003:4003"
     volumes:
@@ -46,75 +56,137 @@ services:
     depends_on:
       - cache
 
-  peer1:
+  peer10:
     build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4011, ANNOUNCE_IP=peer1, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
-    ports: [ "4011:4011" ]
+    environment:
+      - ROLE=peer
+      - PORT=4020
+      - ANNOUNCE_IP=peer10
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - CACHE_HOST=cache
+      - CACHE_PORT=4002
+      - BITSWAP_FLOOD_FORWARD=1
+    ports: [ "4020:4020" ]
     volumes: [ shared13:/shared ]
-    depends_on: [ owner ]
-
-  peer2:
-    build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4012, ANNOUNCE_IP=peer2, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
-    ports: [ "4012:4012" ]
-    volumes: [ shared13:/shared ]
-    depends_on: [ owner ]
-
-  peer3:
-    build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4013, ANNOUNCE_IP=peer3, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
-    ports: [ "4013:4013" ]
-    volumes: [ shared13:/shared ]
-    depends_on: [ owner ]
-
-  peer4:
-    build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4014, ANNOUNCE_IP=peer4, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
-    ports: [ "4014:4014" ]
-    volumes: [ shared13:/shared ]
-    depends_on: [ owner ]
-
-  peer5:
-    build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4015, ANNOUNCE_IP=peer5, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
-    ports: [ "4015:4015" ]
-    volumes: [ shared13:/shared ]
-    depends_on: [ owner ]
-
-  peer6:
-    build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4016, ANNOUNCE_IP=peer6, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
-    ports: [ "4016:4016" ]
-    volumes: [ shared13:/shared ]
-    depends_on: [ owner ]
-
-  peer7:
-    build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4017, ANNOUNCE_IP=peer7, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
-    ports: [ "4017:4017" ]
-    volumes: [ shared13:/shared ]
-    depends_on: [ owner ]
-
-  peer8:
-    build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4018, ANNOUNCE_IP=peer8, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
-    ports: [ "4018:4018" ]
-    volumes: [ shared13:/shared ]
-    depends_on: [ owner ]
+    depends_on: [ owner, cache ]
 
   peer9:
     build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4019, ANNOUNCE_IP=peer9, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
+    environment:
+      - ROLE=peer
+      - PORT=4019
+      - ANNOUNCE_IP=peer9
+      - CHAIN_NEXT_HOST=peer10
+      - CHAIN_NEXT_PORT=4020
+      - BITSWAP_FLOOD_FORWARD=1
     ports: [ "4019:4019" ]
     volumes: [ shared13:/shared ]
-    depends_on: [ owner ]
+    depends_on: [ peer10 ]
 
-  peer10:
+  peer8:
     build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4020, ANNOUNCE_IP=peer10, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
-    ports: [ "4020:4020" ]
+    environment:
+      - ROLE=peer
+      - PORT=4018
+      - ANNOUNCE_IP=peer8
+      - CHAIN_NEXT_HOST=peer9
+      - CHAIN_NEXT_PORT=4019
+      - BITSWAP_FLOOD_FORWARD=1
+    ports: [ "4018:4018" ]
     volumes: [ shared13:/shared ]
-    depends_on: [ owner ]
+    depends_on: [ peer9 ]
+
+  peer7:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment:
+      - ROLE=peer
+      - PORT=4017
+      - ANNOUNCE_IP=peer7
+      - CHAIN_NEXT_HOST=peer8
+      - CHAIN_NEXT_PORT=4018
+      - BITSWAP_FLOOD_FORWARD=1
+    ports: [ "4017:4017" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ peer8 ]
+
+  peer6:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment:
+      - ROLE=peer
+      - PORT=4016
+      - ANNOUNCE_IP=peer6
+      - CHAIN_NEXT_HOST=peer7
+      - CHAIN_NEXT_PORT=4017
+      - BITSWAP_FLOOD_FORWARD=1
+    ports: [ "4016:4016" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ peer7 ]
+
+  peer5:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment:
+      - ROLE=peer
+      - PORT=4015
+      - ANNOUNCE_IP=peer5
+      - CHAIN_NEXT_HOST=peer6
+      - CHAIN_NEXT_PORT=4016
+      - BITSWAP_FLOOD_FORWARD=1
+    ports: [ "4015:4015" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ peer6 ]
+
+  peer4:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment:
+      - ROLE=peer
+      - PORT=4014
+      - ANNOUNCE_IP=peer4
+      - CHAIN_NEXT_HOST=peer5
+      - CHAIN_NEXT_PORT=4015
+      - BITSWAP_FLOOD_FORWARD=1
+    ports: [ "4014:4014" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ peer5 ]
+
+  peer3:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment:
+      - ROLE=peer
+      - PORT=4013
+      - ANNOUNCE_IP=peer3
+      - CHAIN_NEXT_HOST=peer4
+      - CHAIN_NEXT_PORT=4014
+      - BITSWAP_FLOOD_FORWARD=1
+    ports: [ "4013:4013" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ peer4 ]
+
+  peer2:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment:
+      - ROLE=peer
+      - PORT=4012
+      - ANNOUNCE_IP=peer2
+      - CHAIN_NEXT_HOST=peer3
+      - CHAIN_NEXT_PORT=4013
+      - BITSWAP_FLOOD_FORWARD=1
+    ports: [ "4012:4012" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ peer3 ]
+
+  peer1:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment:
+      - ROLE=peer
+      - PORT=4011
+      - ANNOUNCE_IP=peer1
+      - CHAIN_NEXT_HOST=peer2
+      - CHAIN_NEXT_PORT=4012
+      - BITSWAP_FLOOD_FORWARD=1
+    ports: [ "4011:4011" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ peer2 ]
 
 volumes:
   shared13:

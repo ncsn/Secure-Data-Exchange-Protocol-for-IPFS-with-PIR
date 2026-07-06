@@ -1,3 +1,11 @@
+# 3-node baseline (BITSWAP_FLOOD_FORWARD=1, star topology, no chain hops):
+#
+#   bench(host) ──► owner
+#   bench(host) ──► cache ──► owner
+#
+# Flood forwarding is enabled but produces no extra hops here because there
+# is no intermediate peer. This is the baseline for the scaling comparison.
+
 services:
   owner:
     build:
@@ -7,6 +15,7 @@ services:
       - ROLE=owner
       - PORT=4001
       - ANNOUNCE_IP=owner
+      - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4001:4001"
     volumes:
@@ -22,6 +31,7 @@ services:
       - ANNOUNCE_IP=cache
       - OWNER_HOST=owner
       - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4002:4002"
     volumes:
@@ -39,6 +49,7 @@ services:
       - ANNOUNCE_IP=requester
       - CACHE_HOST=cache
       - CACHE_PORT=4002
+      - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4003:4003"
     volumes:

@@ -25,10 +25,10 @@ const runsIdx = argv.indexOf('--runs');
 const RUNS = runsIdx >= 0 ? parseInt(argv[runsIdx + 1], 10) : 20;
 const WARMUP = 2;
 
-const OWNER_HOST = 'localhost';
-const OWNER_PORT = 4001;
-const CACHE_HOST = 'localhost';
-const CACHE_PORT = 4002;
+const OWNER_HOST = process.env.BENCH_OWNER_HOST || 'localhost';
+const OWNER_PORT = parseInt(process.env.BENCH_OWNER_PORT || '4001', 10);
+const CACHE_HOST = process.env.BENCH_CACHE_HOST || 'localhost';
+const CACHE_PORT = parseInt(process.env.BENCH_CACHE_PORT || '4002', 10);
 
 function stats(times) {
   const sorted = [...times].sort((a, b) => a - b);

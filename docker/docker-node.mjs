@@ -207,28 +207,41 @@ async function runPeer() {
   log('Waiting for Owner to be ready...');
   await waitForCids();
 
-  // Connect to owner as bootstrap
-  const ownerHost = process.env.OWNER_HOST || 'owner';
-  const ownerPort = parseInt(process.env.OWNER_PORT || '4001', 10);
-  log(`Connecting to Owner at ${ownerHost}:${ownerPort}...`);
-  const conn = await connectWithRetry(node, ownerHost, ownerPort);
-  log(`Connected to Owner (${conn.remotePeer.id.slice(0, 12)}...)`);
+  // ── Chain topology (opt-in via CHAIN_NEXT_HOST) ──────────────────────────
+  // When set, this peer connects ONLY to CHAIN_NEXT_HOST (its upstream in the
+  // chain), NOT to the owner. Combined with BITSWAP_FLOOD_FORWARD=1, this
+  // forces every WANT_HAVE to traverse the whole chain until it reaches a
+  // node that actually owns/caches the content — producing measurable per-hop
+  // latency in bench-docker.mjs.
+  const chainNextHost = process.env.CHAIN_NEXT_HOST;
+  if (chainNextHost) {
+    const chainNextPort = parseInt(process.env.CHAIN_NEXT_PORT || '4001', 10);
+    log(`Chain mode: connecting to ${chainNextHost}:${chainNextPort} (next hop)`);
+    const c = await connectWithRetry(node, chainNextHost, chainNextPort);
+    log(`Chain hop established (${c.remotePeer.id.slice(0, 12)}...)`);
+  } else {
+    // Default (star) behavior — connect to owner (+ optionally cache) directly.
+    const ownerHost = process.env.OWNER_HOST || 'owner';
+    const ownerPort = parseInt(process.env.OWNER_PORT || '4001', 10);
+    log(`Connecting to Owner at ${ownerHost}:${ownerPort}...`);
+    const conn = await connectWithRetry(node, ownerHost, ownerPort);
+    log(`Connected to Owner (${conn.remotePeer.id.slice(0, 12)}...)`);
 
-  // Also connect to cache if configured
-  if (process.env.CACHE_HOST) {
-    try {
-      const cacheHost = process.env.CACHE_HOST;
-      const cachePort = parseInt(process.env.CACHE_PORT || '4002', 10);
-      log(`Connecting to Cache at ${cacheHost}:${cachePort}...`);
-      const c = await connectWithRetry(node, cacheHost, cachePort, 10);
-      log(`Connected to Cache (${c.remotePeer.id.slice(0, 12)}...)`);
-    } catch (e) {
-      log(`Cache connection failed (ok, not required): ${e.message}`);
+    if (process.env.CACHE_HOST) {
+      try {
+        const cacheHost = process.env.CACHE_HOST;
+        const cachePort = parseInt(process.env.CACHE_PORT || '4002', 10);
+        log(`Connecting to Cache at ${cacheHost}:${cachePort}...`);
+        const c = await connectWithRetry(node, cacheHost, cachePort, 10);
+        log(`Connected to Cache (${c.remotePeer.id.slice(0, 12)}...)`);
+      } catch (e) {
+        log(`Cache connection failed (ok, not required): ${e.message}`);
+      }
     }
   }
 
   console.log('');
-  console.log(`  PEER NODE READY on port ${port} — idle, participating in DHT`);
+  console.log(`  PEER NODE READY on port ${port} — participating in DHT`);
   console.log('');
 
   // Keep alive

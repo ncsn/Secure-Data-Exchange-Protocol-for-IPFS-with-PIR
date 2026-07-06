@@ -1,3 +1,13 @@
+# 8-node chain topology (BITSWAP_FLOOD_FORWARD=1):
+#
+#   bench(host) ──► peer1 ──► peer2 ──► peer3 ──► peer4 ──► peer5 ──► owner
+#                                                                     │
+#                                                                     └─► cache
+#
+# Every peer connects ONLY to its next hop (CHAIN_NEXT_HOST) — no direct edge
+# to owner/cache — so any WANT_HAVE the bench sends must traverse the entire
+# chain before it can be resolved.
+
 services:
   owner:
     build:
@@ -7,6 +17,7 @@ services:
       - ROLE=owner
       - PORT=4001
       - ANNOUNCE_IP=owner
+      - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4001:4001"
     volumes:
@@ -22,6 +33,7 @@ services:
       - ANNOUNCE_IP=cache
       - OWNER_HOST=owner
       - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4002:4002"
     volumes:
@@ -39,6 +51,7 @@ services:
       - ANNOUNCE_IP=requester
       - CACHE_HOST=cache
       - CACHE_PORT=4002
+      - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4003:4003"
     volumes:
@@ -46,40 +59,73 @@ services:
     depends_on:
       - cache
 
-  peer1:
+  # Chain body: peer1 (bench entry) → peer2 → peer3 → peer4 → peer5 → {owner, cache}
+  peer5:
     build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4011, ANNOUNCE_IP=peer1, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
-    ports: [ "4011:4011" ]
+    environment:
+      - ROLE=peer
+      - PORT=4015
+      - ANNOUNCE_IP=peer5
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - CACHE_HOST=cache
+      - CACHE_PORT=4002
+      - BITSWAP_FLOOD_FORWARD=1
+    ports: [ "4015:4015" ]
     volumes: [ shared8:/shared ]
-    depends_on: [ owner ]
-
-  peer2:
-    build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4012, ANNOUNCE_IP=peer2, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
-    ports: [ "4012:4012" ]
-    volumes: [ shared8:/shared ]
-    depends_on: [ owner ]
-
-  peer3:
-    build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4013, ANNOUNCE_IP=peer3, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
-    ports: [ "4013:4013" ]
-    volumes: [ shared8:/shared ]
-    depends_on: [ owner ]
+    depends_on: [ owner, cache ]
 
   peer4:
     build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4014, ANNOUNCE_IP=peer4, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
+    environment:
+      - ROLE=peer
+      - PORT=4014
+      - ANNOUNCE_IP=peer4
+      - CHAIN_NEXT_HOST=peer5
+      - CHAIN_NEXT_PORT=4015
+      - BITSWAP_FLOOD_FORWARD=1
     ports: [ "4014:4014" ]
     volumes: [ shared8:/shared ]
-    depends_on: [ owner ]
+    depends_on: [ peer5 ]
 
-  peer5:
+  peer3:
     build: { context: .., dockerfile: docker/Dockerfile }
-    environment: [ ROLE=peer, PORT=4015, ANNOUNCE_IP=peer5, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
-    ports: [ "4015:4015" ]
+    environment:
+      - ROLE=peer
+      - PORT=4013
+      - ANNOUNCE_IP=peer3
+      - CHAIN_NEXT_HOST=peer4
+      - CHAIN_NEXT_PORT=4014
+      - BITSWAP_FLOOD_FORWARD=1
+    ports: [ "4013:4013" ]
     volumes: [ shared8:/shared ]
-    depends_on: [ owner ]
+    depends_on: [ peer4 ]
+
+  peer2:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment:
+      - ROLE=peer
+      - PORT=4012
+      - ANNOUNCE_IP=peer2
+      - CHAIN_NEXT_HOST=peer3
+      - CHAIN_NEXT_PORT=4013
+      - BITSWAP_FLOOD_FORWARD=1
+    ports: [ "4012:4012" ]
+    volumes: [ shared8:/shared ]
+    depends_on: [ peer3 ]
+
+  peer1:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment:
+      - ROLE=peer
+      - PORT=4011
+      - ANNOUNCE_IP=peer1
+      - CHAIN_NEXT_HOST=peer2
+      - CHAIN_NEXT_PORT=4012
+      - BITSWAP_FLOOD_FORWARD=1
+    ports: [ "4011:4011" ]
+    volumes: [ shared8:/shared ]
+    depends_on: [ peer2 ]
 
 volumes:
   shared8:

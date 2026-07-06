@@ -78,6 +78,23 @@ const MAX_PENDING = 1024;
  *  decoy requests from real PRIVACY_RESPONSE messages. */
 const DECOY_FLAG = Buffer.from('DECOY_TRIPLE_HSH'); // exactly 16 bytes
 
+/** ── Flood forwarding (opt-in) ─────────────────────────────────────────────────
+ *
+ * When BITSWAP_FLOOD_FORWARD=1, an intermediate node that receives a WANT_HAVE
+ * for a CID it does not own / has not cached / does not have in its store will:
+ *   1. Broadcast WANT_HAVE to every OTHER connected peer (excluding origin)
+ *   2. Record the origin connection in _forwardTable so replies can be routed back
+ *   3. Forward all subsequent protocol messages for that CID in both directions
+ *
+ * The flag is OFF by default so existing tests observe unchanged single-hop
+ * behavior. Enable per-container via env var in docker-compose for benchmarks.
+ */
+const FLOOD_FORWARD_ENABLED = process.env.BITSWAP_FLOOD_FORWARD === '1';
+/** How long a forward-table entry stays valid before cleanup (ms). */
+const FORWARD_TTL_MS      = 15_000;
+/** How long a CID stays in _forwardSeen to prevent broadcast loops (ms). */
+const FORWARD_SEEN_TTL_MS = 30_000;
+
 // ── Ledger ────────────────────────────────────────────────────────────────────
 
 class Ledger {
@@ -119,6 +136,50 @@ export class BitswapEngine extends EventEmitter {
     // Populated when this node caches content from an owner.
     // encryptedBlob = AES(OBJ, H(CID¹)) || timestamp — cannot be decrypted by cache node.
     this._cached    = new Map();
+
+    // ── Flood forwarding state (only used when FLOOD_FORWARD_ENABLED) ─────────
+    // _forwardTable: cid → { origin: Connection, holder: Connection|null,
+    //                        fanout: Set<Connection>, ts: number }
+    //   origin  = the connection the initial WANT_HAVE arrived from (replies go there)
+    //   holder  = set to the first peer that responded HAVE/PRIVACY_CHALLENGE/CACHE_CHALLENGE
+    //             (subsequent client-side follow-ups such as WANT_BLOCK / PRIVACY_RESPONSE /
+    //              CACHE_REQUEST / DECOY_REQUEST from `origin` are forwarded to `holder`)
+    //   fanout  = the connections we broadcast to (used to send DONT_HAVE upstream
+    //             only after ALL downstream peers replied DONT_HAVE)
+    //   ts      = insertion time; entries older than FORWARD_TTL_MS are pruned
+    this._forwardTable = new Map();
+
+    // _forwardSeen: cid → ts. Prevents rebroadcasting a WANT_HAVE we already
+    // forwarded (broadcast-loop protection in cyclic topologies).
+    this._forwardSeen  = new Map();
+
+    // Ephemeral DH keypairs from Step 2 of privacy handshake (keyed by cid+peer).
+    // Declared eagerly so type is consistent whether or not flood is on.
+    this._dhEphemeral  = new Map();
+
+    // Periodic cleanup of expired forward entries (unref'd so it doesn't block exit).
+    if (FLOOD_FORWARD_ENABLED) {
+      this._forwardCleanupInterval = setInterval(() => this._cleanupForward(), 5_000);
+      if (this._forwardCleanupInterval.unref) this._forwardCleanupInterval.unref();
+    }
+  }
+
+  /** Stop internal timers — currently only the forward cleanup interval. */
+  stop() {
+    if (this._forwardCleanupInterval) {
+      clearInterval(this._forwardCleanupInterval);
+      this._forwardCleanupInterval = null;
+    }
+  }
+
+  _cleanupForward() {
+    const now = Date.now();
+    for (const [cid, entry] of this._forwardTable) {
+      if (now - entry.ts > FORWARD_TTL_MS) this._forwardTable.delete(cid);
+    }
+    for (const [cid, ts] of this._forwardSeen) {
+      if (now - ts > FORWARD_SEEN_TTL_MS) this._forwardSeen.delete(cid);
+    }
   }
 
   // ── Connection management ─────────────────────────────────────────────────
@@ -137,6 +198,12 @@ export class BitswapEngine extends EventEmitter {
       this.ledgers.set(peerId, new Ledger(peerId));
     }
 
+    // Track active connections for flood-forwarding broadcast (opt-in).
+    if (FLOOD_FORWARD_ENABLED) {
+      if (!this._connections) this._connections = new Set();
+      this._connections.add(conn);
+    }
+
     conn.onMessage(BITSWAP_PROTO, (payload) => {
       this._handleMessage(decode(payload), conn).catch(err =>
         this.emit('error', err)
@@ -144,12 +211,23 @@ export class BitswapEngine extends EventEmitter {
     });
 
     conn.on('close', () => {
+      if (this._connections) this._connections.delete(conn);
       // Clean up any pending requests that were waiting on this peer
       for (const [cid, pending] of this._pending) {
         if (pending.peerId === peerId) {
           clearTimeout(pending.timeout);
           pending.reject(new Error(`Connection closed before block received: ${cid}`));
           this._pending.delete(cid);
+        }
+      }
+      // Clean up forward entries pointing at this connection.
+      if (FLOOD_FORWARD_ENABLED) {
+        for (const [cid, entry] of this._forwardTable) {
+          if (entry.origin === conn || entry.holder === conn) {
+            this._forwardTable.delete(cid);
+          } else if (entry.fanout && entry.fanout.has(conn)) {
+            entry.fanout.delete(conn);
+          }
         }
       }
     });
@@ -387,6 +465,55 @@ export class BitswapEngine extends EventEmitter {
     const peerId = conn.remotePeer.id;
     const ledger = this._ledger(peerId);
 
+    // ── Flood-forwarding hook (opt-in) ────────────────────────────────────────
+    // Handled BEFORE local dispatch so a relay node never accidentally treats
+    // a passing-through response as its own. The forward table tells us where
+    // to send this message next; if there's no entry the message falls through
+    // to the normal handlers below.
+    if (FLOOD_FORWARD_ENABLED && this._forwardTable.has(cid)) {
+      // Upstream direction: responses from downstream peers → back to origin.
+      const upstreamResponseTypes = [
+        MessageType.HAVE,
+        MessageType.DONT_HAVE,
+        MessageType.BLOCK,
+        MessageType.PRIVACY_CHALLENGE,
+        MessageType.PRIVACY_BLOCK,
+        MessageType.CACHE_CHALLENGE,
+        MessageType.CACHE_BLOCK,
+        MessageType.CACHE_RESPONSE,
+        MessageType.DECOY_BLOCK,
+      ];
+      if (upstreamResponseTypes.includes(type)) {
+        // Only intercept if the message is coming from a peer we broadcast to
+        // (or the locked-in holder). If it's from origin, fall through — origin
+        // is upstream, not downstream.
+        const entry = this._forwardTable.get(cid);
+        if (entry.origin !== conn) {
+          this._forwardUpstream(cid, type, payload, conn);
+          return;
+        }
+      }
+
+      // Downstream direction: client follow-ups from origin → holder.
+      const downstreamClientTypes = [
+        MessageType.WANT_BLOCK,
+        MessageType.PRIVACY_RESPONSE,
+        MessageType.CACHE_REQUEST,
+        MessageType.DECOY_REQUEST,
+      ];
+      if (downstreamClientTypes.includes(type)) {
+        const entry = this._forwardTable.get(cid);
+        if (entry.origin === conn && entry.holder) {
+          this._forwardDownstream(cid, type, payload, conn);
+          return;
+        }
+        // If origin === conn but holder not yet locked, drop silently — the
+        // client shouldn't be sending follow-ups before the challenge arrives.
+      }
+      // For WANT_HAVE arriving again on a CID we're already forwarding, fall
+      // through to the normal handler; the loop-guard in _tryFlood handles it.
+    }
+
     // ── Serving side (we received a request) ─────────────────────────────────
 
     if (type === MessageType.WANT_HAVE) {
@@ -470,6 +597,9 @@ export class BitswapEngine extends EventEmitter {
       } else if (this.store.has(cid) && this._shouldServe(ledger)) {
         // Standard request — respond with HAVE
         this._send(conn, MessageType.HAVE, cid);
+      } else if (FLOOD_FORWARD_ENABLED && this._tryFlood(cid, conn)) {
+        // Flood forwarding took over — broadcast WANT_HAVE downstream.
+        // Do NOT send DONT_HAVE here; the reply comes via _forwardTable.
       } else {
         this._send(conn, MessageType.DONT_HAVE, cid);
       }
@@ -1201,6 +1331,165 @@ export class BitswapEngine extends EventEmitter {
   _send(conn, type, cid, payload = Buffer.alloc(0)) {
     const msg = encode(type, cid, payload);
     conn.sendMessage(BITSWAP_PROTO, msg);
+  }
+
+  // ── Flood forwarding helpers (only active when FLOOD_FORWARD_ENABLED) ─────
+
+  /**
+   * _tryFlood(cid, originConn) → boolean
+   *
+   * Called when an incoming WANT_HAVE finds nothing locally. Broadcasts the
+   * WANT_HAVE to every OTHER connection so the request can reach a distant
+   * holder along a chain of relays. Returns true if the flood was initiated
+   * (caller must NOT send DONT_HAVE), false if the flood is a no-op
+   * (no other peers to forward to, or already seen) so caller sends DONT_HAVE.
+   *
+   * @param {string}     cid
+   * @param {Connection} originConn
+   * @returns {boolean}
+   */
+  _tryFlood(cid, originConn) {
+    if (!this._connections || this._connections.size < 2) return false;
+
+    const now = Date.now();
+
+    // Loop-protection: if we've already forwarded this CID recently, don't
+    // rebroadcast — the earlier forward's origin will get the reply.
+    // Special case: if the earlier forward's origin is the same conn, extend
+    // the entry's timestamp so replies still find the origin.
+    if (this._forwardSeen.has(cid)) {
+      const existing = this._forwardTable.get(cid);
+      if (existing) {
+        existing.ts = now;
+        return true; // pretend we forwarded — reply will come through existing entry
+      }
+      return false;
+    }
+
+    // Broadcast to every other connection.
+    const fanout = new Set();
+    for (const c of this._connections) {
+      if (c === originConn) continue;
+      try {
+        this._send(c, MessageType.WANT_HAVE, cid);
+        fanout.add(c);
+      } catch {
+        // dead conn — ignore
+      }
+    }
+    if (fanout.size === 0) return false;
+
+    this._forwardTable.set(cid, {
+      origin: originConn,
+      holder: null,
+      fanout,
+      dontHaveCount: 0,
+      ts: now,
+    });
+    this._forwardSeen.set(cid, now);
+
+    // Safety net: if nobody responds in time, tell upstream DONT_HAVE.
+    setTimeout(() => {
+      const e = this._forwardTable.get(cid);
+      if (!e) return;
+      this._forwardTable.delete(cid);
+      try { this._send(e.origin, MessageType.DONT_HAVE, cid); } catch {}
+    }, FORWARD_TTL_MS - 100).unref?.();
+
+    return true;
+  }
+
+  /**
+   * _forwardUpstream(cid, type, payload, senderConn) → boolean
+   *
+   * If this node has a forward entry for cid, forward the message to the
+   * origin (upstream). On the first HAVE / PRIVACY_CHALLENGE / CACHE_CHALLENGE
+   * we also lock in the "holder" (so subsequent client→holder messages know
+   * where to go). Returns true iff forwarding happened.
+   *
+   * DONT_HAVE forwarded downstream is aggregated: we only forward upstream
+   * DONT_HAVE once ALL peers we broadcast to reply DONT_HAVE.
+   */
+  _forwardUpstream(cid, type, payload, senderConn) {
+    if (!FLOOD_FORWARD_ENABLED) return false;
+    const entry = this._forwardTable.get(cid);
+    if (!entry) return false;
+
+    // DONT_HAVE handling: aggregate — only propagate upstream when the last
+    // downstream peer says DONT_HAVE.
+    if (type === MessageType.DONT_HAVE) {
+      entry.dontHaveCount++;
+      if (entry.fanout.has(senderConn)) entry.fanout.delete(senderConn);
+      if (entry.fanout.size === 0 && !entry.holder) {
+        // All peers said DONT_HAVE, no holder locked — tell origin DONT_HAVE.
+        this._forwardTable.delete(cid);
+        try { this._send(entry.origin, MessageType.DONT_HAVE, cid); } catch {}
+      }
+      // If a holder already locked in, ignore stray DONT_HAVEs from other peers.
+      return true;
+    }
+
+    // First positive reply — lock in the holder if not already.
+    // These are the response types that indicate "I have it (in some form)".
+    const isPositiveReply =
+      type === MessageType.HAVE ||
+      type === MessageType.PRIVACY_CHALLENGE ||
+      type === MessageType.CACHE_CHALLENGE ||
+      type === MessageType.BLOCK ||
+      type === MessageType.PRIVACY_BLOCK ||
+      type === MessageType.CACHE_BLOCK ||
+      type === MessageType.CACHE_RESPONSE ||
+      type === MessageType.DECOY_BLOCK;
+
+    if (isPositiveReply && !entry.holder) {
+      entry.holder = senderConn;
+    }
+
+    // If a different peer than the locked holder is trying to reply, drop it
+    // (this is standard bitswap "first response wins" behavior).
+    if (entry.holder && entry.holder !== senderConn) return true;
+
+    // Refresh timestamp and forward upstream.
+    entry.ts = Date.now();
+    try {
+      this._send(entry.origin, type, cid, payload);
+    } catch {
+      // origin dead — drop entry.
+      this._forwardTable.delete(cid);
+    }
+
+    // Terminal messages: the transaction is done, drop the forward entry.
+    const isTerminal =
+      type === MessageType.BLOCK ||
+      type === MessageType.PRIVACY_BLOCK ||
+      type === MessageType.CACHE_BLOCK ||
+      type === MessageType.DECOY_BLOCK;
+    if (isTerminal) this._forwardTable.delete(cid);
+
+    return true;
+  }
+
+  /**
+   * _forwardDownstream(cid, type, payload, senderConn) → boolean
+   *
+   * Client → holder direction. If we forwarded a WANT_HAVE for this cid and
+   * senderConn is the original origin, forward the client-side follow-up
+   * (WANT_BLOCK / PRIVACY_RESPONSE / CACHE_REQUEST / DECOY_REQUEST) to holder.
+   * Returns true iff forwarding happened.
+   */
+  _forwardDownstream(cid, type, payload, senderConn) {
+    if (!FLOOD_FORWARD_ENABLED) return false;
+    const entry = this._forwardTable.get(cid);
+    if (!entry) return false;
+    if (entry.origin !== senderConn) return false; // not from the upstream origin
+    if (!entry.holder) return false;                // holder not yet locked in
+    entry.ts = Date.now();
+    try {
+      this._send(entry.holder, type, cid, payload);
+    } catch {
+      this._forwardTable.delete(cid);
+    }
+    return true;
   }
 
   // ── Stats ─────────────────────────────────────────────────────────────────
