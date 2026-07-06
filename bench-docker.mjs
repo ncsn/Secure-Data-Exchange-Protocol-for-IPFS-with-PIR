@@ -106,15 +106,17 @@ async function main() {
   });
 
   // ── 5. Cache population (from owner) ────────────────────────────────────
-  // A fresh third-party node asks the owner to serve encrypted content for caching.
+  // A third-party cacher node asks the owner to serve encrypted content for caching.
+  // Persistent cacher (setup once outside the measure loop) — mirrors the paper's
+  // methodology: only the protocol overhead of requestCache() is measured,
+  // not node bootstrap / TCP handshake / bitswap settle time.
+  const cacher = new Node({ announceIp: '127.0.0.1' });
+  await cacher.start(0);
+  const cacherConn = await cacher.connect(OWNER_HOST, OWNER_PORT);
+  await new Promise(r => setTimeout(r, 300)); // let bitswap handshake settle
+
   await measure('Cache population (from owner)', async () => {
-    const cacher = new Node({ announceIp: '127.0.0.1' });
-    await cacher.start(0);
-    const c = await cacher.connect(OWNER_HOST, OWNER_PORT);
-    await new Promise(r => setTimeout(r, 50));
-    // Owner needs to have something to cache — use its default startup file
-    await cacher.bitswap.requestCache(ownerCid3.string, c);
-    await cacher.stop();
+    await cacher.bitswap.requestCache(ownerCid3.string, cacherConn);
   });
 
   // ── 6. Cache retrieval (from cache node) ────────────────────────────────
@@ -131,6 +133,7 @@ async function main() {
   console.log('');
   console.log('Done.');
 
+  await cacher.stop();
   await requester.stop();
   process.exit(0);
 }
