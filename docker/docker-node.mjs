@@ -195,11 +195,51 @@ async function runRequester() {
   setInterval(() => {}, 60000);
 }
 
+// ── PEER (idle DHT participant, for scale testing) ──────────────────────────
+
+async function runPeer() {
+  const node = new Node({ announceIp: ANNOUNCE_IP });
+  const port = await node.start(PORT);
+  log(`Node started on port ${port}`);
+  log(`Peer ID: ${node.id}`);
+
+  // Wait for owner's CIDs (so we know owner is ready)
+  log('Waiting for Owner to be ready...');
+  await waitForCids();
+
+  // Connect to owner as bootstrap
+  const ownerHost = process.env.OWNER_HOST || 'owner';
+  const ownerPort = parseInt(process.env.OWNER_PORT || '4001', 10);
+  log(`Connecting to Owner at ${ownerHost}:${ownerPort}...`);
+  const conn = await connectWithRetry(node, ownerHost, ownerPort);
+  log(`Connected to Owner (${conn.remotePeer.id.slice(0, 12)}...)`);
+
+  // Also connect to cache if configured
+  if (process.env.CACHE_HOST) {
+    try {
+      const cacheHost = process.env.CACHE_HOST;
+      const cachePort = parseInt(process.env.CACHE_PORT || '4002', 10);
+      log(`Connecting to Cache at ${cacheHost}:${cachePort}...`);
+      const c = await connectWithRetry(node, cacheHost, cachePort, 10);
+      log(`Connected to Cache (${c.remotePeer.id.slice(0, 12)}...)`);
+    } catch (e) {
+      log(`Cache connection failed (ok, not required): ${e.message}`);
+    }
+  }
+
+  console.log('');
+  console.log(`  PEER NODE READY on port ${port} — idle, participating in DHT`);
+  console.log('');
+
+  // Keep alive
+  setInterval(() => {}, 60000);
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 log(`Starting as ${ROLE}...`);
 
-const runners = { owner: runOwner, cache: runCache, requester: runRequester };
+const runners = { owner: runOwner, cache: runCache, requester: runRequester, peer: runPeer };
 const runner = runners[ROLE];
 
 if (!runner) {

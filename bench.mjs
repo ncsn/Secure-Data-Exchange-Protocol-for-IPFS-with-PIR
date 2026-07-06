@@ -63,8 +63,7 @@ async function main() {
 
   // 3. Privacy retrieval (4-step)
   await measure('Privacy retrieval (4-step, small file)', async () => {
-    const K = randomAesKey();
-    await nodeA.bitswap.requestPrivate(cid3.string, h1, K, connAB);
+    await nodeA.bitswap.requestPrivate(cid3.string, h1, connAB);
   });
 
   // 4. Decoy request (4-step)
@@ -121,8 +120,7 @@ async function main() {
   const largeCid3 = new CID(largeH3);
 
   await measure('Privacy retrieval (4-step, 1 MB file)', async () => {
-    const K = randomAesKey();
-    await nodeA.bitswap.requestPrivate(largeCid3.string, largeH1, K, connAB);
+    await nodeA.bitswap.requestPrivate(largeCid3.string, largeH1, connAB);
   });
 
   console.log('');

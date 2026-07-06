@@ -489,15 +489,26 @@ export class BitswapEngine extends EventEmitter {
         if (decrypted.length >= DECOY_FLAG.length &&
             decrypted.length < 64 &&
             timingSafeEqual(decrypted.slice(0, DECOY_FLAG.length), DECOY_FLAG)) {
-          // Decoy request — extract size hint and respond with random bits
-          const MAX_DECOY_SIZE = 1024 * 1024; // 1 MiB cap to prevent memory abuse
+          // Decoy request — extract size hint, generate random plaintext, then
+          // wrap it in AES-GCM with a fresh ephemeral key so the wire format
+          // is indistinguishable from a real PRIVACY_BLOCK.
+          // (Paper Fig. 3 shows BLOCK(random-bits); Section V.1 clarifies the
+          // implementation intent: "ECIES-encrypted decoy responses are
+          // indistinguishable from legitimate data blocks.")
+          // The ephemeral key is discarded — A never decrypts, just resolves.
+          // Cap accounts for the 28-byte AES-GCM overhead (12 IV + 16 tag)
+          // so the final wire message stays within 1 MiB.
+          const AES_GCM_OVERHEAD = 12 + 16;
+          const MAX_DECOY_SIZE = 1024 * 1024 - AES_GCM_OVERHEAD;
           const rawHint = decrypted.length >= 20
             ? decrypted.readUInt32BE(DECOY_FLAG.length)
             : 256;
           const sizeHint = Math.min(rawHint, MAX_DECOY_SIZE);
-          const randomData = randomBytes(sizeHint);
-          this._send(conn, MessageType.PRIVACY_BLOCK, cid, randomData);
-          ledger.bytesSent += randomData.length;
+          const randomPlaintext = randomBytes(sizeHint);
+          const ephemeralKey = randomBytes(32);
+          const encryptedDecoy = aesEncrypt(randomPlaintext, ephemeralKey);
+          this._send(conn, MessageType.PRIVACY_BLOCK, cid, encryptedDecoy);
+          ledger.bytesSent += encryptedDecoy.length;
           return;
         }
 
@@ -907,7 +918,10 @@ export class BitswapEngine extends EventEmitter {
       if (decoyPending?.isDecoy) {
         clearTimeout(decoyPending.timeout);
         this._pending.delete(decoyKey);
-        // Discard random bits — decoy complete
+        // Discard the AES-GCM-wrapped random ciphertext — decoy complete.
+        // A never decrypts (no key material shared with B for this exchange);
+        // the wrapping exists purely so an observer cannot distinguish this
+        // block from a real PRIVACY_BLOCK by size or byte-distribution.
         decoyPending.resolve();
         return;
       }

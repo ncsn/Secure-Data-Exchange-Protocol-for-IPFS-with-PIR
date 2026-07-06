@@ -1,0 +1,120 @@
+services:
+  owner:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=owner
+      - PORT=4001
+      - ANNOUNCE_IP=owner
+    ports:
+      - "4001:4001"
+    volumes:
+      - shared13:/shared
+
+  cache:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=cache
+      - PORT=4002
+      - ANNOUNCE_IP=cache
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+    ports:
+      - "4002:4002"
+    volumes:
+      - shared13:/shared
+    depends_on:
+      - owner
+
+  requester:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=requester
+      - PORT=4003
+      - ANNOUNCE_IP=requester
+      - CACHE_HOST=cache
+      - CACHE_PORT=4002
+    ports:
+      - "4003:4003"
+    volumes:
+      - shared13:/shared
+    depends_on:
+      - cache
+
+  peer1:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment: [ ROLE=peer, PORT=4011, ANNOUNCE_IP=peer1, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
+    ports: [ "4011:4011" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ owner ]
+
+  peer2:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment: [ ROLE=peer, PORT=4012, ANNOUNCE_IP=peer2, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
+    ports: [ "4012:4012" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ owner ]
+
+  peer3:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment: [ ROLE=peer, PORT=4013, ANNOUNCE_IP=peer3, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
+    ports: [ "4013:4013" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ owner ]
+
+  peer4:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment: [ ROLE=peer, PORT=4014, ANNOUNCE_IP=peer4, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
+    ports: [ "4014:4014" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ owner ]
+
+  peer5:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment: [ ROLE=peer, PORT=4015, ANNOUNCE_IP=peer5, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
+    ports: [ "4015:4015" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ owner ]
+
+  peer6:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment: [ ROLE=peer, PORT=4016, ANNOUNCE_IP=peer6, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
+    ports: [ "4016:4016" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ owner ]
+
+  peer7:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment: [ ROLE=peer, PORT=4017, ANNOUNCE_IP=peer7, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
+    ports: [ "4017:4017" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ owner ]
+
+  peer8:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment: [ ROLE=peer, PORT=4018, ANNOUNCE_IP=peer8, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
+    ports: [ "4018:4018" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ owner ]
+
+  peer9:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment: [ ROLE=peer, PORT=4019, ANNOUNCE_IP=peer9, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
+    ports: [ "4019:4019" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ owner ]
+
+  peer10:
+    build: { context: .., dockerfile: docker/Dockerfile }
+    environment: [ ROLE=peer, PORT=4020, ANNOUNCE_IP=peer10, OWNER_HOST=owner, OWNER_PORT=4001, CACHE_HOST=cache, CACHE_PORT=4002 ]
+    ports: [ "4020:4020" ]
+    volumes: [ shared13:/shared ]
+    depends_on: [ owner ]
+
+volumes:
+  shared13:
