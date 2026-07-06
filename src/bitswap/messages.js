@@ -18,17 +18,25 @@
  *       │                                  │
  *       │── CANCEL(cid) ─────────────────►│  "Never mind" (got it elsewhere)
  *
- * ── Privacy protocol message flow ────────────────────────────────────────────
+ * ── Privacy protocol message flow (paper Fig. 2) ─────────────────────────────
  *
- *   Requester A                        Owner B
- *       │                                  │
- *       │── WANT_HAVE(cid3) ─────────────►│  Step 1: search by CID³
- *       │◄─ PRIVACY_CHALLENGE(sig_cid2) ──│  Step 2: B signs CID² → proves ownership
- *       │                                  │         A verifies sig with B's public key
- *       │── PRIVACY_RESPONSE(             │  Step 3: A encrypts CID¹+K with B's pubkey
- *       │     ecies(cid1 + K, B_pub)) ───►│         B decrypts → verifies CID¹, gets K
- *       │◄─ PRIVACY_BLOCK(aes_K(OBJ)) ───│  Step 4: B encrypts OBJ with K, sends it
- *       │                                  │         A decrypts with K, verifies hash=CID¹
+ *   The session key K_AB is derived via ephemeral Diffie–Hellman during the
+ *   handshake, providing forward secrecy: compromising the owner's long-term
+ *   ECDSA/ECIES key does not reveal past session keys.
+ *
+ *   Requester A                                        Owner B
+ *       │                                                  │
+ *       │── WANT_HAVE(CID³) ─────────────────────────────►│  Step 1
+ *       │                                                  │
+ *       │◄─ PRIVACY_CHALLENGE(                            │  Step 2
+ *       │     Sign_SSK_B(CID² ‖ PKB ‖ G^b), PKB, G^b) ───│  B generates
+ *       │      A verifies signature against PKB           │  ephemeral (b, G^b)
+ *       │                                                  │
+ *       │── PRIVACY_RESPONSE(                             │  Step 3
+ *       │     ECIES_PKB(CID¹ ‖ H(K_AB) ‖ G^a)) ─────────►│  K_AB = KDF(G^ab)
+ *       │      A generates ephemeral (a, G^a)              │  B verifies H(K_AB)
+ *       │◄─ PRIVACY_BLOCK(AES_K_AB(OBJ)) ────────────────│  Step 4
+ *       │      A decrypts, verifies H(OBJ) = CID¹.digest  │
  *
  * ── Wire format ───────────────────────────────────────────────────────────────
  *
