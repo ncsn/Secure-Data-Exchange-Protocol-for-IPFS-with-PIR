@@ -436,12 +436,24 @@ export class BitswapEngine extends EventEmitter {
           return;
         }
 
-        // Payload: [ auth_len(2) | auth | ownerPubKeyLen(2) | ownerPubKey | cachePubKeyLen(2) | cachePubKey ]
+        // Payload: [ auth_len(2) | auth | ownerPubKeyLen(2) | ownerPubKey | cachePubKeyLen(2) | cachePubKey | Gc'(65) ]
+        // Per paper §III (line 141): C's response includes "the authorization
+        // received from B, along with B's and C's public keys to make the
+        // signature verifiable." The signature is over (CID² ‖ PKC ‖ Gc'),
+        // so Gc' MUST also be sent so A can reconstruct the signed data.
         const cachePubKey = this.localPeer.publicKeyRaw;
+        const cacheGprime = cached.cacheGprime;
+        if (!cacheGprime || cacheGprime.length !== 65) {
+          // Cached entry is from an old code path without Gc' — cannot serve.
+          this._cached.delete(cid);
+          this._send(conn, MessageType.DONT_HAVE, cid);
+          return;
+        }
         const challengePayload = Buffer.alloc(
           2 + cached.authorization.length +
           2 + cached.ownerPubKeyRaw.length +
-          2 + cachePubKey.length
+          2 + cachePubKey.length +
+          cacheGprime.length
         );
         let off = 0;
         challengePayload.writeUInt16BE(cached.authorization.length, off); off += 2;
@@ -449,7 +461,8 @@ export class BitswapEngine extends EventEmitter {
         challengePayload.writeUInt16BE(cached.ownerPubKeyRaw.length, off); off += 2;
         cached.ownerPubKeyRaw.copy(challengePayload, off);                off += cached.ownerPubKeyRaw.length;
         challengePayload.writeUInt16BE(cachePubKey.length, off);           off += 2;
-        cachePubKey.copy(challengePayload, off);
+        cachePubKey.copy(challengePayload, off);                           off += cachePubKey.length;
+        cacheGprime.copy(challengePayload, off);
 
         this._send(conn, MessageType.CACHE_CHALLENGE, cid, challengePayload);
         ledger.bytesSent += challengePayload.length;
@@ -580,12 +593,34 @@ export class BitswapEngine extends EventEmitter {
       if (this._owned.has(cid)) {
         const owned = this._owned.get(cid);
         try {
-          // Decrypt payload: ecies(K + C_pubKeyRaw, B_pubkey)
+          // Decrypt payload: ecies(pkLen(2) ‖ PKC ‖ Gc' ‖ K, B_pubkey)
           const decrypted = eciesDecrypt(payload, this.localPeer.privateKey);
 
-          // Payload is K (32 bytes) + C's public key (remaining bytes)
-          const K          = decrypted.slice(0, 32);
-          const cPubKeyRaw = decrypted.slice(32);
+          // Parse: [ pkLen(2) | PKC | Gc'(65) | K(32) ]
+          if (decrypted.length < 2) {
+            this._send(conn, MessageType.DONT_HAVE, cid);
+            return;
+          }
+          const pkLen = decrypted.readUInt16BE(0);
+          const DH_LEN = 65; // uncompressed P-256 point
+          const K_LEN  = 32;
+          if (decrypted.length < 2 + pkLen + DH_LEN + K_LEN) {
+            this._send(conn, MessageType.DONT_HAVE, cid);
+            return;
+          }
+          let off = 2;
+          const cPubKeyRaw = decrypted.slice(off, off + pkLen); off += pkLen;
+          const Gc_prime   = decrypted.slice(off, off + DH_LEN); off += DH_LEN;
+          const K          = decrypted.slice(off, off + K_LEN);
+
+          // SECURITY: bind the payload's PKC to the authenticated peer identity
+          // so a MITM cannot swap in a different cache node's key.
+          const expectedKey = conn.remotePeer.publicKeyRaw;
+          if (cPubKeyRaw.length !== expectedKey.length ||
+              !timingSafeEqual(cPubKeyRaw, expectedKey)) {
+            this._send(conn, MessageType.DONT_HAVE, cid);
+            return;
+          }
 
           // Fetch raw data from block store
           const rawData = this.store.get(owned.cid1.string);
@@ -605,8 +640,10 @@ export class BitswapEngine extends EventEmitter {
           // Outer encryption: AES_K(blob)
           const outerCipher = aesEncrypt(blob, K);
 
-          // Sign authorization: sign(CID².digest || C_pubKeyRaw)
-          const authData = Buffer.concat([owned.cid2.digest, cPubKeyRaw]);
+          // Sign authorization: sign(CID².digest || PKC || Gc')
+          // Per paper §III (line 139): "a signature of CID² concatenated with
+          // C's public key and DH parameter."
+          const authData = Buffer.concat([owned.cid2.digest, cPubKeyRaw, Gc_prime]);
           const authorization = sign(authData, this.localPeer.privateKey);
 
           // Build CACHE_RESPONSE: [ outerLen(4) | outer_cipher | auth_len(2) | auth | ownerPubKeyLen(2) | ownerPubKey ]
@@ -614,13 +651,13 @@ export class BitswapEngine extends EventEmitter {
           const response = Buffer.alloc(
             4 + outerCipher.length + 2 + authorization.length + 2 + ownerPubKey.length
           );
-          let off = 0;
-          response.writeUInt32BE(outerCipher.length, off);               off += 4;
-          outerCipher.copy(response, off);                               off += outerCipher.length;
-          response.writeUInt16BE(authorization.length, off);             off += 2;
-          authorization.copy(response, off);                             off += authorization.length;
-          response.writeUInt16BE(ownerPubKey.length, off);               off += 2;
-          ownerPubKey.copy(response, off);
+          let rOff = 0;
+          response.writeUInt32BE(outerCipher.length, rOff);               rOff += 4;
+          outerCipher.copy(response, rOff);                               rOff += outerCipher.length;
+          response.writeUInt16BE(authorization.length, rOff);             rOff += 2;
+          authorization.copy(response, rOff);                             rOff += authorization.length;
+          response.writeUInt16BE(ownerPubKey.length, rOff);               rOff += 2;
+          ownerPubKey.copy(response, rOff);
 
           this._send(conn, MessageType.CACHE_RESPONSE, cid, response);
           ledger.bytesSent += response.length;
@@ -747,14 +784,32 @@ export class BitswapEngine extends EventEmitter {
           return;
         }
 
-        // Step 3: send CACHE_REQUEST with ecies(K + our_pubkey, B_pubkey)
+        // Step 3: send CACHE_REQUEST with ecies(K ‖ PKC ‖ Gc', B_pubkey)
+        // Per paper §III (line 139): C "responds with the previously exchanged
+        // parameters, extended with an additional Diffie–Hellman public value
+        // G^{c'} and the public key PKC. The message is encrypted using B's
+        // public key." The authorization signature will then bind CID² to
+        // BOTH C's identity AND its ephemeral DH parameter, preventing
+        // signature reuse across different cache sessions.
         const K = randomBytes(32);  // fresh AES session key
-        cachePending._cacheK = K;   // stash for when CACHE_RESPONSE arrives
-        const cachePayload = Buffer.concat([K, this.localPeer.publicKeyRaw]);
+        const { privateKey: gc_prime, publicKey: Gc_prime } = generateDHKeyPair();
+        cachePending._cacheK = K;             // stash for when CACHE_RESPONSE arrives
+        cachePending._cacheGprime = Gc_prime; // needed later so C can serve CACHE_CHALLENGE
+        const cachePubKey = this.localPeer.publicKeyRaw;
+        // Fixed-length encoded so B can parse unambiguously.
+        // Layout: [ pkLen(2) | PKC | Gc_prime(65) | K(32) ]
+        const cachePayload = Buffer.concat([
+          Buffer.from([cachePubKey.length >> 8, cachePubKey.length & 0xff]),
+          cachePubKey,
+          Gc_prime,
+          K,
+        ]);
         const encrypted = eciesEncrypt(cachePayload, conn.remotePeer.publicKey);
 
         this._send(conn, MessageType.CACHE_REQUEST, cid, encrypted);
         ledger.bytesSent += encrypted.length;
+        // gc_prime discarded — only Gc_prime (public) needs to be retained.
+        void gc_prime;
         return;
       }
 
@@ -984,8 +1039,9 @@ export class BitswapEngine extends EventEmitter {
         // Store in _cached — keep full blob intact for re-serving
         this._cached.set(cid, {
           encryptedBlob: blob,     // innerCipher || timestamp — we cannot decrypt the inner part
-          authorization,         // sign(CID².digest || our_pubkey)
+          authorization,         // sign(CID².digest || our_pubkey || Gc')
           ownerPubKeyRaw,        // B's public key (SPKI DER)
+          cacheGprime: pending._cacheGprime,  // Gc' bound in the authorization signature
           timestamp,
         });
 
@@ -1009,22 +1065,39 @@ export class BitswapEngine extends EventEmitter {
       if (!pending?.isCacheRetrieval) return;
 
       try {
-        // Unpack: [ auth_len(2) | auth | ownerPubKeyLen(2) | ownerPubKey | cachePubKeyLen(2) | cachePubKey ]
+        // Unpack: [ auth_len(2) | auth | ownerPubKeyLen(2) | ownerPubKey | cachePubKeyLen(2) | cachePubKey | Gc'(65) ]
+        const DH_LEN = 65;
+        if (payload.length < 2) {
+          throw new Error('CACHE_CHALLENGE: payload too short');
+        }
         let off = 0;
         const authLen = payload.readUInt16BE(off); off += 2;
+        if (off + authLen + 2 > payload.length) {
+          throw new Error('CACHE_CHALLENGE: malformed payload (auth)');
+        }
         const authorization = payload.slice(off, off + authLen); off += authLen;
         const ownerPubKeyLen = payload.readUInt16BE(off); off += 2;
+        if (off + ownerPubKeyLen + 2 > payload.length) {
+          throw new Error('CACHE_CHALLENGE: malformed payload (owner pk)');
+        }
         const ownerPubKeyRaw = payload.slice(off, off + ownerPubKeyLen); off += ownerPubKeyLen;
         const cachePubKeyLen = payload.readUInt16BE(off); off += 2;
-        const cachePubKeyRaw = payload.slice(off, off + cachePubKeyLen);
+        if (off + cachePubKeyLen + DH_LEN > payload.length) {
+          throw new Error('CACHE_CHALLENGE: malformed payload (cache pk / Gc)');
+        }
+        const cachePubKeyRaw = payload.slice(off, off + cachePubKeyLen); off += cachePubKeyLen;
+        const cacheGprime    = payload.slice(off, off + DH_LEN);
 
         // Reconstruct owner's public key from DER bytes
         const ownerPubKey = createPublicKey({ key: ownerPubKeyRaw, type: 'spki', format: 'der' });
 
-        // SECURITY: verify authorization — owner B signed (CID².digest || C_pubkey)
+        // SECURITY: verify authorization — owner B signed (CID².digest || PKC || Gc')
+        // Per paper §III (line 139): "signature of CID² concatenated with C's
+        // public key and DH parameter." Binding Gc' prevents an attacker from
+        // reusing the authorization with a substituted DH parameter.
         // Requester A derives CID² from its known CID¹: CID² = H(H(OBJ)) = H(cid1Digest)
         const expectedCid2Digest = hash(pending.cid1Digest);
-        const authData = Buffer.concat([expectedCid2Digest, cachePubKeyRaw]);
+        const authData = Buffer.concat([expectedCid2Digest, cachePubKeyRaw, cacheGprime]);
         if (!verify(authData, authorization, ownerPubKey)) {
           clearTimeout(pending.timeout);
           this._pending.delete(key);
