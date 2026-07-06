@@ -423,9 +423,14 @@ export class Node {
   /**
    * sendDecoy() → Promise<void>
    *
-   * Picks a random CID³ from the registry and sends a decoy request to a
-   * connected peer that owns it. The exchange is indistinguishable from a
-   * real privacy handshake to outside observers.
+   * Picks a random CID³ and sends a decoy request to a random provider
+   * identified via the DHT (paper §III.B, line 286: "the node dispatches
+   * 1–3 decoy requests to random providers identified via the DHT").
+   *
+   * The CID³ pool is drawn from the local registry (announced content
+   * observed on the network); the provider lookup for that CID³ goes
+   * through dht.findProviders() so decoy traffic exercises the same
+   * routing path a real observer would see.
    *
    * Returns silently if no suitable targets are available.
    */
@@ -437,30 +442,71 @@ export class Node {
       return { ok: false, error: 'No connected peers' };
     }
 
-    // Build list of eligible (cid3, peerId) pairs:
-    // - provider must not be self (can't decoy-request your own content)
-    // - provider must have an active transport connection
-    const eligible = [];
+    // 1. Pick a random CID³ from the registry (skip ones we own ourselves —
+    //    a self-request is not a valid decoy target).
+    const cid3Candidates = [];
     for (const [cid3, providers] of this._cidRegistry) {
-      for (const peerId of providers) {
-        if (peerId === this.id) continue; // skip self-owned
-        if (this.transport.connections.has(peerId)) {
-          eligible.push({ cid3, peerId });
+      // Filter out CIDs where WE are the sole provider — nothing to decoy against.
+      const others = [...providers].filter(p => p !== this.id);
+      if (others.length === 0) continue;
+      cid3Candidates.push(cid3);
+    }
+    if (cid3Candidates.length === 0) {
+      return { ok: false, error: 'No eligible CID\u00b3s for decoy (all self-owned)' };
+    }
+    const cid3 = cid3Candidates[Math.floor(Math.random() * cid3Candidates.length)];
+
+    // 2. Resolve providers via the DHT (paper alignment — line 286).
+    //    Short timeout: decoys are best-effort background traffic.
+    let providers = [];
+    try {
+      providers = await this.dht.findProviders(cid3, 3000);
+    } catch {
+      providers = [];
+    }
+
+    // Filter: no self, must be a real peer we can reach.
+    providers = providers.filter(p => p.peerId && p.peerId !== this.id);
+
+    if (providers.length === 0) {
+      // Fallback to registry (still paper-compatible: the registry is
+      // populated from DHT announcements we've observed). Ensures decoys
+      // keep firing even when the DHT lookup times out on a cold network.
+      const cached = this._cidRegistry.get(cid3);
+      if (cached) {
+        const peerIds = [...cached].filter(p => p !== this.id);
+        if (peerIds.length === 0) {
+          return { ok: false, error: 'No non-self providers for chosen CID\u00b3' };
         }
+        const peerId = peerIds[Math.floor(Math.random() * peerIds.length)];
+        const conn = this.transport.connections.get(peerId);
+        if (!conn) {
+          return { ok: false, error: 'No active connection to fallback provider' };
+        }
+        try {
+          await this.bitswap.sendDecoy(cid3, conn);
+          return { ok: true, source: 'registry-fallback' };
+        } catch (e) {
+          return { ok: false, error: e.message };
+        }
+      }
+      return { ok: false, error: 'DHT returned no providers and no registry fallback' };
+    }
+
+    // 3. Pick a random DHT-resolved provider and dial if needed.
+    const target = providers[Math.floor(Math.random() * providers.length)];
+    let conn = this.transport.connections.get(target.peerId);
+    if (!conn) {
+      try {
+        conn = await this.connect(target.ip, target.port);
+      } catch (e) {
+        return { ok: false, error: `Cannot dial decoy target: ${e.message}` };
       }
     }
 
-    if (eligible.length === 0) {
-      return { ok: false, error: 'No eligible decoy targets \u2014 need connected peers who own content (not self-owned)' };
-    }
-
-    // Pick a random eligible target
-    const target = eligible[Math.floor(Math.random() * eligible.length)];
-    const conn = this.transport.connections.get(target.peerId);
-
     try {
-      await this.bitswap.sendDecoy(target.cid3, conn);
-      return { ok: true };
+      await this.bitswap.sendDecoy(cid3, conn);
+      return { ok: true, source: 'dht' };
     } catch (e) {
       return { ok: false, error: e.message };
     }
