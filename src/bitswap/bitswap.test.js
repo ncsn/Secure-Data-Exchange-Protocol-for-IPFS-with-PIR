@@ -548,47 +548,23 @@ async function run() {
     // The key assertion is that the protocol completes successfully.
     await bsA.sendDecoy(cid3.string, connA);
 
-    // Now test with a forged payload: inject PRIVACY_RESPONSE with a huge sizeHint
-    // directly into B's handler to verify the cap works.
+    // Now test with a forged payload: inject DECOY_REQUEST with a huge sizeHint
+    // directly into the provider's handler to verify the cap works.
     const DECOY_FLAG = Buffer.from('DECOY_TRIPLE_HSH');
     const bigHint = Buffer.alloc(4);
     bigHint.writeUInt32BE(0xFFFFFFFF, 0); // 4 GiB — absurd
-    const decoyPayload = Buffer.concat([DECOY_FLAG, bigHint]);
-
-    // Encrypt with B's public key (as the real protocol does)
     const { eciesEncrypt } = await import('../libp2p/crypto.js');
-    const encryptedPayload = eciesEncrypt(decoyPayload, bsB.localPeer.publicKey);
 
-    // Capture the response by listening for the PRIVACY_BLOCK sent by B
-    let responseSent = false;
-    let responseSize = 0;
-    const origSend = bsB._send.bind(bsB);
-    bsB._send = (conn, type, cid, payload) => {
-      if (type === MessageType.PRIVACY_BLOCK) {
-        responseSent = true;
-        responseSize = payload.length;
-      }
-      origSend(conn, type, cid, payload);
-    };
-
-    // Inject the forged PRIVACY_RESPONSE
-    const fakeMsg = {
-      type: MessageType.PRIVACY_RESPONSE,
-      cid: cid3.string,
-      payload: encryptedPayload,
-    };
-    // Need a connection object with a remotePeer for the ledger
-    const { connB } = await makePair();
-    // Use the actual bsB handler with the original pair connection
-    const { bsA: bsA3, bsB: bsB3, connA: connA3, connB: connB3 } = await makePair();
+    // Fresh pair — need a peer we can inject into
+    const { bsB: bsB3, connB: connB3 } = await makePair();
     const objData2 = Buffer.from('object for decoy cap test 2');
     const { cid3: cid3b } = bsB3.registerOwned(objData2);
 
-    // Intercept _send on bsB3
+    // Intercept _send on bsB3 to capture the outgoing DECOY_BLOCK
     let capResponseSize = 0;
     const origSend3 = bsB3._send.bind(bsB3);
     bsB3._send = (conn, type, cid, payload) => {
-      if (type === MessageType.PRIVACY_BLOCK) {
+      if (type === MessageType.DECOY_BLOCK) {
         capResponseSize = payload.length;
       }
       origSend3(conn, type, cid, payload);
@@ -598,12 +574,12 @@ async function run() {
     const decoyPayload2 = Buffer.concat([DECOY_FLAG, bigHint]);
     const encrypted2 = eciesEncrypt(decoyPayload2, bsB3.localPeer.publicKey);
     await bsB3._handleMessage({
-      type: MessageType.PRIVACY_RESPONSE,
+      type: MessageType.DECOY_REQUEST,
       cid: cid3b.string,
       payload: encrypted2,
     }, connB3);
 
-    assert(capResponseSize > 0, 'B should have sent a PRIVACY_BLOCK response');
+    assert(capResponseSize > 0, 'B should have sent a DECOY_BLOCK response');
     assert(capResponseSize <= 1024 * 1024, `Response ${capResponseSize} bytes exceeds 1 MiB cap`);
   });
 

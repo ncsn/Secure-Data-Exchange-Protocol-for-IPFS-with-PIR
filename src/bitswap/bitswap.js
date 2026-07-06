@@ -486,10 +486,8 @@ export class BitswapEngine extends EventEmitter {
     }
 
     // ── Privacy Step 3: owner receives PRIVACY_RESPONSE ───────────────────────
-    // This handler serves BOTH real privacy requests AND decoy requests.
-    // Since decoys use the same PRIVACY_RESPONSE message type (for wire
-    // indistinguishability), the owner must decrypt first and then check
-    // whether the payload starts with DECOY_FLAG to distinguish the two.
+    // Decoys arrive on the dedicated DECOY_REQUEST type (see handler below),
+    // so this handler only processes real privacy requests.
     if (type === MessageType.PRIVACY_RESPONSE) {
       if (!this._owned.has(cid)) return;
       const owned = this._owned.get(cid);
@@ -497,33 +495,6 @@ export class BitswapEngine extends EventEmitter {
       try {
         // Decrypt the payload with our private key
         const decrypted = eciesDecrypt(payload, this.localPeer.privateKey);
-
-        // Check for DECOY_FLAG prefix (16 bytes) — if present, this is a decoy
-        if (decrypted.length >= DECOY_FLAG.length &&
-            decrypted.length < 64 &&
-            timingSafeEqual(decrypted.slice(0, DECOY_FLAG.length), DECOY_FLAG)) {
-          // Decoy request — extract size hint, generate random plaintext, then
-          // wrap it in AES-GCM with a fresh ephemeral key so the wire format
-          // is indistinguishable from a real PRIVACY_BLOCK.
-          // (Paper Fig. 3 shows BLOCK(random-bits); Section V.1 clarifies the
-          // implementation intent: "ECIES-encrypted decoy responses are
-          // indistinguishable from legitimate data blocks.")
-          // The ephemeral key is discarded — A never decrypts, just resolves.
-          // Cap accounts for the 28-byte AES-GCM overhead (12 IV + 16 tag)
-          // so the final wire message stays within 1 MiB.
-          const AES_GCM_OVERHEAD = 12 + 16;
-          const MAX_DECOY_SIZE = 1024 * 1024 - AES_GCM_OVERHEAD;
-          const rawHint = decrypted.length >= 20
-            ? decrypted.readUInt32BE(DECOY_FLAG.length)
-            : 256;
-          const sizeHint = Math.min(rawHint, MAX_DECOY_SIZE);
-          const randomPlaintext = randomBytes(sizeHint);
-          const ephemeralKey = randomBytes(32);
-          const encryptedDecoy = aesEncrypt(randomPlaintext, ephemeralKey);
-          this._send(conn, MessageType.PRIVACY_BLOCK, cid, encryptedDecoy);
-          ledger.bytesSent += encryptedDecoy.length;
-          return;
-        }
 
         // Real privacy request — paper Figure 2 Step 3:
         // Decrypted payload: [ CID₁ digest (32) | H(K_AB) (32) | Ga (65) ]
@@ -581,9 +552,38 @@ export class BitswapEngine extends EventEmitter {
       return;
     }
 
-    // Note: DECOY_REQUEST (0x20) handler removed — decoys now use PRIVACY_RESPONSE
-    // for wire indistinguishability. The PRIVACY_RESPONSE handler above detects
-    // decoys via DECOY_FLAG after ECIES decryption.
+    // ── Decoy Step 3: provider receives DECOY_REQUEST (paper Fig. 3) ──────────
+    // Dedicated wire type: the provider does not need to attempt CID² recovery
+    // or do a full privacy-response decode. Payload is
+    // ECIES(DECOY_FLAG(16) ‖ sizeHint(4), R_pub); we verify the flag as a
+    // sanity check (defence in depth against type spoofing), then reply with
+    // AES-GCM-wrapped random bits of the requested size.
+    if (type === MessageType.DECOY_REQUEST) {
+      try {
+        const decrypted = eciesDecrypt(payload, this.localPeer.privateKey);
+        // Expect exactly DECOY_FLAG(16) ‖ sizeHint(4)
+        if (decrypted.length < DECOY_FLAG.length + 4 ||
+            !timingSafeEqual(decrypted.slice(0, DECOY_FLAG.length), DECOY_FLAG)) {
+          // Malformed / spoofed — silently drop (do not signal a real DONT_HAVE
+          // so an attacker cannot use us as a decoy oracle).
+          return;
+        }
+        const AES_GCM_OVERHEAD = 12 + 16;
+        const MAX_DECOY_SIZE = 1024 * 1024 - AES_GCM_OVERHEAD;
+        const rawHint = decrypted.readUInt32BE(DECOY_FLAG.length);
+        const sizeHint = Math.min(rawHint, MAX_DECOY_SIZE);
+        const randomPlaintext = randomBytes(sizeHint);
+        const ephemeralKey = randomBytes(32);
+        const encryptedDecoy = aesEncrypt(randomPlaintext, ephemeralKey);
+        // Ephemeral key discarded — A never decrypts; the AES-GCM envelope
+        // exists purely to match the wire profile of a real PRIVACY_BLOCK.
+        this._send(conn, MessageType.DECOY_BLOCK, cid, encryptedDecoy);
+        ledger.bytesSent += encryptedDecoy.length;
+      } catch {
+        // Decryption failure → not a valid decoy → silently drop.
+      }
+      return;
+    }
 
     // ── Cache population Step 3: owner receives CACHE_REQUEST ─────────────────
     if (type === MessageType.CACHE_REQUEST) {
@@ -817,13 +817,14 @@ export class BitswapEngine extends EventEmitter {
       const decoyPending = this._pending.get(cid + ':decoy');
 
       if (decoyPending?.isDecoy) {
-        // Decoy Step 2→3: received PRIVACY_CHALLENGE from owner B.
-        // Send PRIVACY_RESPONSE (same message type as a real request!) containing
-        // ecies(DECOY_FLAG + sizeHint, B_pubkey). On the wire this is completely
-        // indistinguishable from a real PRIVACY_RESPONSE — same type byte, same
-        // ECIES envelope. Only the owner can tell the difference after decryption.
+        // Decoy Step 2→3 (paper Fig. 3): received PRIVACY_CHALLENGE from R.
+        // Send DECOY_REQUEST containing ecies(DECOY_FLAG + sizeHint, R_pubkey).
+        // A dedicated wire type is used so the honest provider can dispatch
+        // decoy handling from the message type alone; wire-level
+        // indistinguishability from real traffic is preserved by matching
+        // the ECIES-envelope size profile.
 
-        // Extract B's public key from the new format:
+        // Extract R's public key from the DH challenge format:
         // [ Gb_len(2) | Gb | sig_len(2) | sig | pubKey_len(2) | pubKey ]
 
         // SECURITY: bounds check before parsing
@@ -870,15 +871,15 @@ export class BitswapEngine extends EventEmitter {
         }
 
         // Build decoy payload: DECOY_FLAG(16) + sizeHint(4)
-        // sizeHint tells owner how many random bytes to send back (mimics real file size)
+        // The flag is retained inside the ECIES envelope as a defence in depth
+        // — even if the message type were spoofed, the provider still validates
+        // via decryption before honouring the request.
         const sizeHint = Buffer.alloc(4);
         sizeHint.writeUInt32BE(256 + Math.floor(Math.random() * 1024), 0);
         const decoyPayload = Buffer.concat([DECOY_FLAG, sizeHint]);
         const encryptedDecoy = eciesEncrypt(decoyPayload, conn.remotePeer.publicKey);
 
-        // Use PRIVACY_RESPONSE — not DECOY_REQUEST — so the message type byte
-        // on the wire is identical to a real request (indistinguishable to observers)
-        this._send(conn, MessageType.PRIVACY_RESPONSE, cid, encryptedDecoy);
+        this._send(conn, MessageType.DECOY_REQUEST, cid, encryptedDecoy);
         ledger.bytesSent += encryptedDecoy.length;
         return;
       }
@@ -963,25 +964,9 @@ export class BitswapEngine extends EventEmitter {
     }
 
     // ── Privacy Step 4: requester receives PRIVACY_BLOCK ─────────────────────
-    // This handler serves BOTH real privacy responses AND decoy responses.
-    // Since decoys now use PRIVACY_BLOCK (not DECOY_BLOCK) for wire
-    // indistinguishability, we check for decoy pending entries first.
+    // Real privacy responses only — decoys arrive on DECOY_BLOCK (see handler
+    // below), so no decoy check is required here.
     if (type === MessageType.PRIVACY_BLOCK) {
-      // Check for decoy pending first (keyed as cid + ':decoy')
-      const decoyKey = cid + ':decoy';
-      const decoyPending = this._pending.get(decoyKey);
-      if (decoyPending?.isDecoy) {
-        clearTimeout(decoyPending.timeout);
-        this._pending.delete(decoyKey);
-        // Discard the AES-GCM-wrapped random ciphertext — decoy complete.
-        // A never decrypts (no key material shared with B for this exchange);
-        // the wrapping exists purely so an observer cannot distinguish this
-        // block from a real PRIVACY_BLOCK by size or byte-distribution.
-        decoyPending.resolve();
-        return;
-      }
-
-      // Real privacy response
       const pending = this._pending.get(cid);
       if (!pending?.isPrivate) return;
       clearTimeout(pending.timeout);
@@ -1008,8 +993,21 @@ export class BitswapEngine extends EventEmitter {
       return;
     }
 
-    // Note: DECOY_BLOCK (0x21) handler removed — decoy responses now arrive as
-    // PRIVACY_BLOCK and are handled by the PRIVACY_BLOCK handler above.
+    // ── Decoy Step 4: requester receives DECOY_BLOCK (paper Fig. 3) ───────────
+    // The payload is an AES-GCM envelope over random bits keyed with an
+    // ephemeral key we never share with. We do not attempt to decrypt —
+    // arrival alone completes the decoy exchange and matches the paper's
+    // "no verification, no side effect" decoy semantics.
+    if (type === MessageType.DECOY_BLOCK) {
+      const decoyKey = cid + ':decoy';
+      const decoyPending = this._pending.get(decoyKey);
+      if (!decoyPending?.isDecoy) return;
+      clearTimeout(decoyPending.timeout);
+      this._pending.delete(decoyKey);
+      ledger.bytesReceived += payload.length;
+      decoyPending.resolve();
+      return;
+    }
 
     // ── Cache population Step 4: cache node C receives CACHE_RESPONSE ─────────
     if (type === MessageType.CACHE_RESPONSE) {

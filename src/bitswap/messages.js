@@ -38,6 +38,30 @@
  *       │◄─ PRIVACY_BLOCK(AES_K_AB(OBJ)) ────────────────│  Step 4
  *       │      A decrypts, verifies H(OBJ) = CID¹.digest  │
  *
+ * ── Decoy protocol message flow (paper Fig. 3) ───────────────────────────────
+ *
+ *   After every successful retrieval, A dispatches 1–3 decoy requests to
+ *   random providers identified via the DHT. Wire-level indistinguishability
+ *   from real traffic is preserved by matching size and timing profiles
+ *   (same ECIES envelope shape on request, same AES-GCM envelope on response).
+ *
+ *   Requester A                        Random provider R
+ *       │                                  │
+ *       │── WANT_HAVE(CID³_random) ──────►│  Step 1 (paper Fig. 3)
+ *       │◄─ PRIVACY_CHALLENGE(...) ───────│  Step 2 (as usual)
+ *       │── DECOY_REQUEST(                │  Step 3 — dedicated wire type;
+ *       │     ECIES_PKR(flag ‖ size)) ──►│  R detects decoy without needing
+ *       │                                  │  to inspect encrypted contents
+ *       │◄─ DECOY_BLOCK(                  │  Step 4 — R replies with
+ *       │     AES_ephemeral(random)) ────│  ephemeral-keyed random ciphertext
+ *
+ *   Design note (paper §V.1): decoy messages carry a distinct wire type but
+ *   the encrypted payload profile (ECIES envelope on request, AES-GCM block
+ *   on response) matches real traffic in size and byte-distribution, so an
+ *   observer cannot distinguish decoys from real retrievals without breaking
+ *   the underlying encryption. The dedicated type simplifies the honest
+ *   provider's decision path (no DECOY_FLAG probing after decryption).
+ *
  * ── Wire format ───────────────────────────────────────────────────────────────
  *
  *   All messages are sent over a Connection using the '/bitswap/1.0' protocol.
@@ -70,11 +94,13 @@ export const MessageType = Object.freeze({
   PRIVACY_RESPONSE  : 0x11,  // A → B: ecies(CID¹ + K, B_pub)  [Step 3]
   PRIVACY_BLOCK     : 0x12,  // B → A: aes_K(OBJ)  [Step 4]
 
-  // Decoy protocol extension (legacy message types — kept for backwards compat
-  // but no longer sent on the wire; decoys now reuse PRIVACY_RESPONSE/PRIVACY_BLOCK
-  // for full wire indistinguishability)
-  DECOY_REQUEST : 0x20,  // DEPRECATED: decoys now use PRIVACY_RESPONSE (0x11)
-  DECOY_BLOCK   : 0x21,  // DEPRECATED: decoy responses now use PRIVACY_BLOCK (0x12)
+  // Decoy protocol extension (paper Fig. 3, §V.1) — dedicated wire types.
+  // Payload envelope profile matches PRIVACY_RESPONSE / PRIVACY_BLOCK in
+  // size and byte-distribution, so decoys are indistinguishable from real
+  // traffic to a network observer, but the honest provider can detect a
+  // decoy directly from the message type without probing the ciphertext.
+  DECOY_REQUEST : 0x20,  // A → R: ecies(flag ‖ size, R_pub)   [decoy Step 3]
+  DECOY_BLOCK   : 0x21,  // R → A: aes_ephemeral(random_bits)  [decoy Step 4]
 
   // Encrypted caching protocol extension
   CACHE_REQUEST   : 0x30,  // C → B: ecies(K + C_pubkey, B_pub) [cache population Step 3]
