@@ -432,60 +432,6 @@ window.ipfs.onControllerEvent(data => {
   if (data.level === 'error') showToast(data.message, 'error');
 });
 
-// ── Cache ────────────────────────────────────────────────────────────────────
-const cacheCid3Input   = document.getElementById('cache-cid3');
-const cachePeerSelect  = document.getElementById('cache-peer-select');
-const btnCache         = document.getElementById('btn-cache');
-const cacheError       = document.getElementById('cache-error');
-const cacheResult      = document.getElementById('cache-result');
-const btnRefreshCache  = document.getElementById('btn-refresh-cache');
-
-// Populate peer dropdown from connected peers
-async function refreshCachePeerDropdown() {
-  if (!nodeRunning) return;
-  const list = await window.ipfs.getPeers();
-  cachePeerSelect.innerHTML = '<option value="">Select peer\u2026</option>';
-  for (const p of list) {
-    if (p.source !== 'transport') continue; // only directly connected peers
-    const opt = document.createElement('option');
-    opt.value = p.peerId;
-    opt.textContent = `${p.peerId.slice(0, 16)}\u2026 (${p.address})`;
-    cachePeerSelect.appendChild(opt);
-  }
-}
-
-btnCache.addEventListener('click', async () => {
-  cacheError.textContent = 'Encrypted caching has been removed from this build.';
-  cacheResult.classList.add('hidden');
-});
-
-// Cached items table
-async function refreshCacheTable() {
-  const tbody = document.getElementById('cache-tbody');
-  tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center">Encrypted caching has been removed</td></tr>';
-}
-
-// Remove cached item (event delegation)
-document.getElementById('cache-table').addEventListener('click', async (e) => {
-  if (!e.target.classList.contains('btn-remove-cache')) return;
-  refreshCacheTable();
-});
-
-btnRefreshCache.addEventListener('click', () => {
-  refreshCacheTable();
-  refreshCachePeerDropdown();
-});
-
-// Refresh peer dropdown when navigating to cache tab
-navItems.forEach(item => {
-  if (item.dataset.page === 'cache') {
-    item.addEventListener('click', () => {
-      refreshCachePeerDropdown();
-      refreshCacheTable();
-    });
-  }
-});
-
 // ── Copy buttons (event delegation) ──────────────────────────────────────────
 document.addEventListener('click', (e) => {
   if (!e.target.classList.contains('btn-copy')) return;

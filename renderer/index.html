@@ -23,7 +23,6 @@
         <li class="nav-item" data-page="get">Get File</li>
         <li class="nav-item" data-page="storage">Storage</li>
         <li class="nav-item" data-page="peers">Peers</li>
-        <li class="nav-item" data-page="cache">Cache</li>
         <li class="nav-item" data-page="dht">DHT</li>
         <li class="nav-item" data-page="log">Event Log</li>
         <li class="nav-item" data-page="settings">Settings</li>
@@ -57,10 +56,6 @@
           <div class="card">
             <div class="card-label">Storage Used</div>
             <div class="card-value" id="card-storage-bytes">0 B</div>
-          </div>
-          <div class="card">
-            <div class="card-label">Cached Items</div>
-            <div class="card-value" id="card-cached">0</div>
           </div>
           <div class="card">
             <div class="card-label">DHT Peers</div>
@@ -257,32 +252,6 @@
         <table id="peer-table">
           <thead><tr><th>Peer ID</th><th>Address</th><th>Protocol</th><th>Source</th><th>Sent</th><th>Received</th><th>Action</th></tr></thead>
           <tbody id="peer-tbody"></tbody>
-        </table>
-      </section>
-
-      <!-- Cache -->
-      <section id="page-cache" class="page">
-        <h1>Encrypted Cache</h1>
-        <p class="hint">Cache files from connected peers. Cached objects are stored encrypted &#8212; this node never learns CID&#185;.</p>
-
-        <h2>Cache from Peer</h2>
-        <div class="form-row">
-          <input type="text" id="cache-cid3" placeholder="CID&#179; (public CID from DHT)&#8230;" />
-          <select id="cache-peer-select">
-            <option value="">Select peer&#8230;</option>
-          </select>
-          <button id="btn-cache" class="primary">Cache</button>
-        </div>
-        <div id="cache-error" class="form-error"></div>
-        <div id="cache-result" class="result-box hidden">
-          <div class="result-note">Cached successfully! This node can now serve this content to other peers.</div>
-        </div>
-
-        <h2>Cached Items</h2>
-        <button id="btn-refresh-cache">Refresh</button>
-        <table id="cache-table">
-          <thead><tr><th>CID&#179;</th><th>Cached At</th><th>Action</th></tr></thead>
-          <tbody id="cache-tbody"></tbody>
         </table>
       </section>
 

@@ -48,18 +48,17 @@ async function main() {
 
   // 2. File add + triple hash + DHT publish
   let addResult;
+  const testKey = Buffer.alloc(32, 0xab); // fixed benchmark HMAC key
   await measure('File add + triple hash + DHT publish', async () => {
     const content = Buffer.from('Benchmark test content ' + Math.random());
-    addResult = await nodeB.addBytes(content, { name: 'bench.txt' });
+    addResult = await nodeB.addBytes(content, { name: 'bench.txt', k: testKey });
   });
 
-  // Prepare CIDs for retrieval
-  // Note: tripleHash now requires HMAC key k; derive h3 via HMAC for consistency
+  // Prepare CIDs for retrieval. addBytes registered CID3 = HMAC_testKey(H(H(obj))),
+  // so we re-derive it here under the same key.
   const cid1 = cidFromString(addResult.cid1);
   const h1 = cid1.digest;
   const h2 = hash(h1);
-  // For benchmarking purposes use a fixed test key
-  const testKey = Buffer.alloc(32, 0xab);
   const { createHmac } = await import('crypto');
   const h3 = createHmac('sha256', testKey).update(h2).digest();
   const cid3 = new CID(h3);
@@ -76,7 +75,7 @@ async function main() {
 
   // 5. Large file transfer
   const largeContent = Buffer.alloc(1024 * 1024, 0x42); // 1 MB
-  const largeRes = await nodeB.addBytes(largeContent, { name: 'large.bin' });
+  const largeRes = await nodeB.addBytes(largeContent, { name: 'large.bin', k: testKey });
   const largeCid1 = cidFromString(largeRes.cid1);
   const largeH1 = largeCid1.digest;
   const largeH2 = hash(largeH1);

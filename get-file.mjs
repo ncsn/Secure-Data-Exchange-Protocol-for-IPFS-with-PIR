@@ -3,12 +3,17 @@
 /**
  * get-file.mjs — CLI tool to retrieve a file using the privacy protocol
  *
+ * CID³ is HMAC_k(H(H(file))) and therefore cannot be derived from CID¹ alone —
+ * it is shared out-of-band (together with the key k) by the owner, exactly like
+ * the desktop app's "Get File" tab. So both CID¹ and CID³ are supplied directly:
+ * CID¹ provides the integrity digest, CID³ is the DHT discovery handle.
+ *
  * Usage:
- *   node get-file.mjs <CID1> <host> <port> [output-path]
+ *   node get-file.mjs <CID1> <CID3> <host> <port> [output-path]
  *
  * Example:
- *   node get-file.mjs bafkrei... 127.0.0.1 4001
- *   node get-file.mjs bafkrei... localhost 4001 ./myfile.bin
+ *   node get-file.mjs bafkrei...CID1 bafkrei...CID3 127.0.0.1 4001
+ *   node get-file.mjs bafkrei...CID1 bafkrei...CID3 localhost 4001 ./myfile.bin
  */
 
 import fs from 'fs';
@@ -16,23 +21,23 @@ import path from 'path';
 import { Node } from './src/node/node.js';
 import { cidFromString } from './src/cid/cid.js';
 import { hash } from './src/cid/crypto.js';
-import { CID } from './src/cid/cid.js';
 
 // ── Parse args ───────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
 
-if (args.length < 3) {
-  console.log('Usage: node get-file.mjs <CID1> <host> <port> [output-path]');
+if (args.length < 4) {
+  console.log('Usage: node get-file.mjs <CID1> <CID3> <host> <port> [output-path]');
   console.log('');
-  console.log('  CID1        The private CID (starts with "b", ~59 chars)');
+  console.log('  CID1        The private integrity CID (starts with "b", ~59 chars)');
+  console.log('  CID3        The public discovery CID = HMAC_k(CID2), shared out-of-band');
   console.log('  host        IP or hostname of the owner/provider node');
   console.log('  port        TCP port of the owner/provider node');
   console.log('  output-path Optional output file path (default: ./retrieved-<cid>.bin)');
   process.exit(1);
 }
 
-const [cid1String, host, portStr, outputArg] = args;
+const [cid1String, cid3String, host, portStr, outputArg] = args;
 const port = parseInt(portStr, 10);
 
 if (isNaN(port) || port < 1 || port > 65535) {
@@ -48,22 +53,25 @@ async function main() {
   console.log('==========================================');
   console.log('');
 
-  // Parse CID1
-  let cid1;
+  // Parse CID1 (integrity digest) and CID3 (discovery handle)
+  let cid1, cid3;
   try {
     cid1 = cidFromString(cid1String);
   } catch (e) {
     console.error(`Invalid CID1: ${e.message}`);
     process.exit(1);
   }
+  try {
+    cid3 = cidFromString(cid3String);
+  } catch (e) {
+    console.error(`Invalid CID3: ${e.message}`);
+    process.exit(1);
+  }
 
-  const h1 = cid1.digest;          // H(OBJ)
-  const h2 = hash(h1);             // H(H(OBJ))
-  const h3 = hash(h2);             // H(H(H(OBJ)))
-  const cid3 = new CID(h3);
+  const h1 = cid1.digest;          // H(OBJ) — used for integrity verification
 
   console.log(`  CID1:  ${cid1String.slice(0, 40)}...`);
-  console.log(`  CID3:  ${cid3.string.slice(0, 40)}... (derived)`);
+  console.log(`  CID3:  ${cid3String.slice(0, 40)}...`);
   console.log(`  Peer:  ${host}:${port}`);
   console.log('');
 
