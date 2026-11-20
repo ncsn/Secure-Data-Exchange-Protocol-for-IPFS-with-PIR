@@ -1,12 +1,12 @@
 # 8-node chain topology (BITSWAP_FLOOD_FORWARD=1):
 #
 #   bench(host) ──► peer1 ──► peer2 ──► peer3 ──► peer4 ──► peer5 ──► owner
-#                                                                     │
-#                                                                     └─► cache
+#                                                             peer6 ──► owner
 #
 # Every peer connects ONLY to its next hop (CHAIN_NEXT_HOST) — no direct edge
-# to owner/cache — so any WANT_HAVE the bench sends must traverse the entire
-# chain before it can be resolved.
+# to owner — so any WANT_HAVE the bench sends must traverse the entire
+# chain before it can be resolved. peer6 (formerly the cache role) is now a
+# plain DHT peer connected to the owner.
 
 services:
   owner:
@@ -17,20 +17,21 @@ services:
       - ROLE=owner
       - PORT=4001
       - ANNOUNCE_IP=owner
+      - BENCH_HMAC_KEY=bench-hmac-key-32-bytes-padding!!
       - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4001:4001"
     volumes:
       - shared8:/shared
 
-  cache:
+  peer6:
     build:
       context: ..
       dockerfile: docker/Dockerfile
     environment:
-      - ROLE=cache
+      - ROLE=peer
       - PORT=4002
-      - ANNOUNCE_IP=cache
+      - ANNOUNCE_IP=peer6
       - OWNER_HOST=owner
       - OWNER_PORT=4001
       - BITSWAP_FLOOD_FORWARD=1
@@ -49,17 +50,17 @@ services:
       - ROLE=requester
       - PORT=4003
       - ANNOUNCE_IP=requester
-      - CACHE_HOST=cache
-      - CACHE_PORT=4002
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
       - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4003:4003"
     volumes:
       - shared8:/shared
     depends_on:
-      - cache
+      - owner
 
-  # Chain body: peer1 (bench entry) → peer2 → peer3 → peer4 → peer5 → {owner, cache}
+  # Chain body: peer1 (bench entry) → peer2 → peer3 → peer4 → peer5 → owner
   peer5:
     build: { context: .., dockerfile: docker/Dockerfile }
     environment:
@@ -68,12 +69,10 @@ services:
       - ANNOUNCE_IP=peer5
       - OWNER_HOST=owner
       - OWNER_PORT=4001
-      - CACHE_HOST=cache
-      - CACHE_PORT=4002
       - BITSWAP_FLOOD_FORWARD=1
     ports: [ "4015:4015" ]
     volumes: [ shared8:/shared ]
-    depends_on: [ owner, cache ]
+    depends_on: [ owner ]
 
   peer4:
     build: { context: .., dockerfile: docker/Dockerfile }

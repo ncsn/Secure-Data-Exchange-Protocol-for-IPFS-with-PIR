@@ -6,7 +6,6 @@
 import { Node } from './src/node/node.js';
 import { cidFromString, CID } from './src/cid/cid.js';
 import { hash } from './src/cid/crypto.js';
-import { randomAesKey } from './src/libp2p/crypto.js';
 
 const RUNS = 20;
 
@@ -55,10 +54,14 @@ async function main() {
   });
 
   // Prepare CIDs for retrieval
+  // Note: tripleHash now requires HMAC key k; derive h3 via HMAC for consistency
   const cid1 = cidFromString(addResult.cid1);
   const h1 = cid1.digest;
   const h2 = hash(h1);
-  const h3 = hash(h2);
+  // For benchmarking purposes use a fixed test key
+  const testKey = Buffer.alloc(32, 0xab);
+  const { createHmac } = await import('crypto');
+  const h3 = createHmac('sha256', testKey).update(h2).digest();
   const cid3 = new CID(h3);
 
   // 3. Privacy retrieval (4-step)
@@ -66,57 +69,18 @@ async function main() {
     await nodeA.bitswap.requestPrivate(cid3.string, h1, connAB);
   });
 
-  // 4. Decoy request (4-step)
-  await measure('Decoy request (4-step, discarded)', async () => {
-    await nodeA.bitswap.sendDecoy(cid3.string, connAB);
-  });
-
-  // 5. Cache population
-  // Need a third node for caching
-  const nodeC = new Node({ announceIp: '127.0.0.1' });
-  const portC = await nodeC.start(0);
-  const connCB = await nodeC.connect('127.0.0.1', portB);
-  await new Promise(r => setTimeout(r, 50));
-
-  await measure('Cache population (from owner)', async () => {
-    // Re-register owned object each time since cache uses it
-    const content = Buffer.from('Cache bench content ' + Math.random());
-    const res = await nodeB.addBytes(content, { name: 'cachebench.txt' });
-    const c1 = cidFromString(res.cid1);
-    const ch3 = hash(hash(c1.digest));
-    const cc3 = new CID(ch3);
-    await nodeC.bitswap.requestCache(cc3.string, connCB);
-  });
-
-  // 6. Cache retrieval — set up a cached object for A to retrieve from C
-  const cacheContent = Buffer.from('Cached content for retrieval benchmark');
-  const cacheRes = await nodeB.addBytes(cacheContent, { name: 'cacheget.txt' });
-  const cacheCid1 = cidFromString(cacheRes.cid1);
-  const cacheH1 = cacheCid1.digest;
-  const cacheH3 = hash(hash(cacheH1));
-  const cacheCid3 = new CID(cacheH3);
-  await nodeC.bitswap.requestCache(cacheCid3.string, connCB);
-
-  // A connects to C
-  const connAC = await nodeA.connect('127.0.0.1', portC);
-  await new Promise(r => setTimeout(r, 50));
-
-  await measure('Cache retrieval (from cache node)', async () => {
-    const K = randomAesKey();
-    await nodeA.bitswap.requestFromCache(cacheCid3.string, cacheH1, K, connAC);
-  });
-
-  // 7. DHT iterative lookup
-  await measure('DHT provider lookup (3 nodes)', async () => {
+  // 4. DHT iterative lookup
+  await measure('DHT provider lookup (2 nodes)', async () => {
     await nodeA.dht.findProviders(cid3.string, 5000);
   });
 
-  // 8. Large file transfer
+  // 5. Large file transfer
   const largeContent = Buffer.alloc(1024 * 1024, 0x42); // 1 MB
   const largeRes = await nodeB.addBytes(largeContent, { name: 'large.bin' });
   const largeCid1 = cidFromString(largeRes.cid1);
   const largeH1 = largeCid1.digest;
-  const largeH3 = hash(hash(largeH1));
+  const largeH2 = hash(largeH1);
+  const largeH3 = createHmac('sha256', testKey).update(largeH2).digest();
   const largeCid3 = new CID(largeH3);
 
   await measure('Privacy retrieval (4-step, 1 MB file)', async () => {
@@ -128,7 +92,6 @@ async function main() {
 
   await nodeA.stop();
   await nodeB.stop();
-  await nodeC.stop();
   process.exit(0);
 }
 

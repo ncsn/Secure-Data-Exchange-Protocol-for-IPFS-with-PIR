@@ -35,6 +35,9 @@ import { TCPTransport }                         from '../libp2p/transport.js';
 import { PeerId }                               from '../libp2p/peer.js';
 import { tripleHash }                           from '../cid/cid.js';
 
+// Fixed HMAC key for deterministic CID³ in tests (owner shares k out-of-band).
+const K = Buffer.alloc(32, 0xab);
+
 // ── Harness ───────────────────────────────────────────────────────────────────
 
 let passed = 0;
@@ -263,7 +266,7 @@ async function run() {
   await test('Privacy rule: only CID¹ and CID³ are announced, never CID²', async () => {
     const { dht } = await makeNode();
     const data = Buffer.from('private object content');
-    const { cid1, cid2, cid3 } = tripleHash(data);
+    const { cid1, cid2, cid3 } = tripleHash(data, K);
 
     // Simulate correct behaviour: announce cid1 and cid3 only
     dht.provide(cid1.string);

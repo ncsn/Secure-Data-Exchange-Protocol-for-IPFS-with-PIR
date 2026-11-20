@@ -80,8 +80,6 @@
             <span id="privacy-score-text">Unknown</span>
           </div>
           <div class="privacy-details">
-            <div class="privacy-detail"><span class="label">Decoys:</span> <span id="privacy-decoys">--</span></div>
-            <div class="privacy-detail"><span class="label">CID Registry:</span> <span id="privacy-registry">--</span></div>
             <div class="privacy-detail"><span class="label">Connected Peers:</span> <span id="privacy-peers">--</span></div>
           </div>
         </div>
@@ -139,6 +137,9 @@
         <div class="form-row">
           <input type="text" id="get-cid" placeholder="CID&#185; &#8230;" />
           <button id="btn-get" class="primary">Retrieve</button>
+        </div>
+        <div class="form-row">
+          <input type="text" id="input-hmac-k" placeholder="HMAC key k (hex) &#8212; shared by owner" />
         </div>
         <div id="get-error" class="form-error"></div>
 
@@ -332,15 +333,6 @@
         </div>
 
         <div class="dht-section">
-          <h2>CID Registry (Decoy Targets)</h2>
-          <p class="hint">CID&#179; values seen from DHT announcements. Used as targets for decoy requests.</p>
-          <table class="dht-table">
-            <thead><tr><th>CID&#179;</th><th>Known Providers</th><th>Self-owned</th></tr></thead>
-            <tbody id="dht-registry-tbody"></tbody>
-          </table>
-        </div>
-
-        <div class="dht-section">
           <h2>Lookup Tool</h2>
           <p class="hint">Run an iterative DHT findProviders query for any CID.</p>
           <div class="form-row">
@@ -386,26 +378,6 @@
               <div class="setting-desc">Where blocks are stored on disk.</div>
             </div>
             <input type="text" id="setting-data-dir" class="setting-input wide" readonly />
-          </div>
-        </div>
-        <div class="settings-group">
-          <h2>Privacy</h2>
-          <div class="setting-row">
-            <div class="setting-info">
-              <div class="setting-label">Decoy Requests</div>
-              <div class="setting-desc">Send decoy requests to prevent traffic analysis linking CID&#179; to CID&#185;.</div>
-            </div>
-            <label class="toggle">
-              <input type="checkbox" id="setting-decoys" checked />
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-          <div class="setting-row">
-            <div class="setting-info">
-              <div class="setting-label">Test Decoy</div>
-              <div class="setting-desc">Manually send a single decoy request to a random peer. Check the Event Log to see the result.</div>
-            </div>
-            <button id="btn-send-decoy">Send Decoy</button>
           </div>
         </div>
         <div class="settings-group">

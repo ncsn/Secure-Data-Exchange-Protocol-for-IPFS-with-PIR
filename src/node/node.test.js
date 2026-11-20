@@ -30,7 +30,6 @@ import path from 'path';
 import os   from 'os';
 
 import { Node }       from './node.js';
-import { tripleHash } from '../cid/cid.js';
 import { hash }       from '../cid/crypto.js';
 import { CHUNK_SIZE } from '../dag/chunker.js';
 
@@ -139,7 +138,7 @@ async function run() {
     const { cid1, cid3 } = await a.addBytes(original);
 
     // B needs cid1 digest to initiate the handshake
-    const { h1 } = tripleHash(original);
+    const h1 = hash(original);
     const received = await b.get(cid3, h1);
 
     assert(original.equals(received), 'Retrieved bytes do not match original');
@@ -153,10 +152,10 @@ async function run() {
     await sleep(100);
 
     const original = Buffer.from('integrity check content');
-    await a.addBytes(original);
-    const { h1 } = tripleHash(original);
+    const { cid3 } = await a.addBytes(original);
+    const h1 = hash(original);
 
-    const received     = await b.get(tripleHash(original).cid3.string, h1);
+    const received     = await b.get(cid3, h1);
     const receivedHash = hash(received);
     assert(receivedHash.equals(h1), 'H(received) ≠ CID¹ digest — integrity failure');
   });
@@ -190,7 +189,7 @@ async function run() {
 
     const original = Buffer.from('three-node test content');
     const { cid3 }  = await a.addBytes(original);
-    const { h1 }    = tripleHash(original);
+    const h1        = hash(original);
 
     // B should have learned about A's providers via DHT propagation
     // C asks B for providers, then connects directly to A
@@ -209,7 +208,7 @@ async function run() {
 
     const original = Buffer.from('in-memory content test');
     const { cid3 }  = await a.addBytes(original);
-    const { h1 }    = tripleHash(original);
+    const h1        = hash(original);
     const received  = await b.get(cid3, h1);
 
     assert(original.equals(received), 'addBytes round-trip failed');
@@ -224,7 +223,7 @@ async function run() {
 
     const original = Buffer.alloc(CHUNK_SIZE + 5000, 0x42);
     const { cid3 }  = await a.addBytes(original);
-    const { h1 }    = tripleHash(original);
+    const h1        = hash(original);
     const received  = await b.get(cid3, h1);
 
     assert(original.equals(received), 'Large file round-trip failed');
@@ -292,7 +291,7 @@ async function run() {
 
     const original = Buffer.from('concurrent retrieval stress test — both should succeed');
     const { cid3 } = await a.addBytes(original);
-    const { h1 } = tripleHash(original);
+    const h1 = hash(original);
 
     // Fire both gets simultaneously
     const [resultB, resultC] = await Promise.all([

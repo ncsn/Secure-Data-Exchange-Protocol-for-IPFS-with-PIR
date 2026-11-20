@@ -174,7 +174,7 @@ async function addFile(filePath) {
       level:   'ok',
       message: `Added — CID³ published: ${result.cid3.slice(0, 24)}…`,
     });
-    return { ok: true, ...result };
+    return { ok: true, ...result, k: result.k.toString('hex') };
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -186,21 +186,22 @@ async function addFile(filePath) {
  * Retrieves a file using the 4-step Enhanced Privacy Protocol.
  * Saves the result to the user's Downloads folder.
  */
-async function getFile(cid1String) {
+async function getFile(cid1String, kHex) {
   if (!node) return { ok: false, error: 'Node not running' };
+  if (!kHex) return { ok: false, error: 'HMAC key k is required to derive CID³ (shared out-of-band by the owner)' };
   try {
     // Reconstruct CID¹ from its string to extract the raw digest h1 = H(OBJ)
     const { cidFromString, CID } = await import(CID_URL);
-    const { hash }               = await import(CRYPTO_URL);
+    const { hash, hmac }         = await import(CRYPTO_URL);
 
     const cid1   = cidFromString(cid1String);
     const h1     = cid1.digest;       // h1 = H(OBJ)
 
-    // Derive CID³ correctly: h2 = H(h1), h3 = H(h2), cid3 = CID(h3)
-    // (tripleHash(h1) would treat h1 as raw data and re-hash it from scratch,
-    //  producing the wrong CID³)
+    // Derive CID³ with the new HMAC scheme: h2 = H(h1), h3 = HMAC_k(h2), cid3 = CID(h3)
+    // k is the 32-byte HMAC key shared out-of-band by the owner.
     const h2   = hash(h1);
-    const h3   = hash(h2);
+    const k    = Buffer.from(kHex, 'hex');
+    const h3   = hmac(k, h2);
     const cid3 = new CID(h3);
 
     _emit('transfer:update', {
@@ -350,102 +351,6 @@ function getConfig() {
   };
 }
 
-// ── Cache operations ─────────────────────────────────────────────────────────
-
-/**
- * cacheFromPeer(cid3String, peerId) → { ok, error? }
- *
- * Requests to cache an object from a connected peer (the owner).
- * This node stores the encrypted blob without ever learning CID¹.
- */
-async function cacheFromPeer(cid3String, peerId) {
-  if (!node) return { ok: false, error: 'Node not running' };
-  try {
-    const conn = node.transport.connections.get(peerId);
-    if (!conn) return { ok: false, error: `Not connected to peer: ${peerId.slice(0, 12)}…` };
-
-    _emit('controller:event', {
-      level: 'info',
-      message: `Caching CID³ ${cid3String.slice(0, 20)}… from peer ${peerId.slice(0, 12)}…`,
-    });
-
-    await node.cacheFrom(cid3String, conn);
-
-    _emit('controller:event', {
-      level: 'ok',
-      message: `Cached successfully — CID³: ${cid3String.slice(0, 24)}…`,
-    });
-
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
-}
-
-/**
- * getCachedItems() → Array<{ cid3, timestamp }>
- *
- * Returns the list of items this node is caching.
- */
-function getCachedItems() {
-  if (!node) return [];
-  const items = [];
-  for (const [cid3, entry] of node.bitswap._cached) {
-    items.push({
-      cid3,
-      timestamp: entry.timestamp,
-    });
-  }
-  return items;
-}
-
-/**
- * removeCached(cid3String) → { ok }
- *
- * Removes a cached item.
- */
-function removeCached(cid3String) {
-  if (!node) return { ok: false, error: 'Node not running' };
-  node.bitswap._cached.delete(cid3String);
-  _emit('controller:event', {
-    level: 'info',
-    message: `Removed cached item: ${cid3String.slice(0, 24)}…`,
-  });
-  return { ok: true };
-}
-
-// ── Decoy operations ────────────────────────────────────────────────────────
-
-/**
- * setDecoysEnabled(enabled) → void
- *
- * Toggles automatic decoy requests on/off.
- */
-function setDecoysEnabled(enabled) {
-  if (node) node._decoysEnabled = !!enabled;
-}
-
-/**
- * sendDecoy() → { ok, error? }
- *
- * Manually triggers a single decoy request for testing.
- */
-async function sendDecoy() {
-  if (!node) return { ok: false, error: 'Node not running' };
-  try {
-    const res = await node.sendDecoy();
-    if (res && res.ok) {
-      _emit('controller:event', {
-        level: 'info',
-        message: 'Decoy request sent and completed (response discarded)',
-      });
-    }
-    return res;
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
-}
-
 // ── DHT operations ─────────────────────────────────────────────────────────
 
 /**
@@ -457,7 +362,7 @@ function getDHTStats() {
   return {
     peers:        dhtStat.peers,
     providers:    dhtStat.providers,
-    registry:     node._cidRegistry.size,
+    registry:     0,
     connections:  node.transport.connections.size,
     kBucketSize:  20,
   };
@@ -500,13 +405,6 @@ function getDHTProviders() {
   }
 
   const registry = [];
-  for (const [cid3, peerSet] of node._cidRegistry) {
-    registry.push({
-      cid3,
-      peers:     [...peerSet],
-      selfOwned: peerSet.has(node.id),
-    });
-  }
 
   return { providers, registry };
 }
@@ -529,7 +427,7 @@ async function dhtLookup(cid) {
   }
 }
 
-module.exports = { start, stop, getStatus, addFile, getFile, getPeers, connectToPeer, disconnectPeer, getConfig, cacheFromPeer, getCachedItems, removeCached, setDecoysEnabled, sendDecoy, getDHTStats, getDHTBuckets, getDHTProviders, dhtLookup, getStorageStats, getBlocks, pinBlock, unpinBlock, deleteBlock, runGC, getBandwidthStats, getPrivacyScore, getBootstrapPeers, addBootstrapPeer, removeBootstrapPeer };
+module.exports = { start, stop, getStatus, addFile, getFile, getPeers, connectToPeer, disconnectPeer, getConfig, getDHTStats, getDHTBuckets, getDHTProviders, dhtLookup, getStorageStats, getBlocks, pinBlock, unpinBlock, deleteBlock, runGC, getBandwidthStats, getPrivacyScore, getBootstrapPeers, addBootstrapPeer, removeBootstrapPeer };
 
 // ── Storage operations ──────────────────────────────────────────────────────
 
@@ -615,19 +513,14 @@ function getBandwidthStats() {
 }
 
 function getPrivacyScore() {
-  if (!node) return { decoysEnabled: false, registrySize: 0, connectedPeers: 0, score: 'poor' };
-  const decoysEnabled = !!node._decoysEnabled;
-  const registrySize = node._cidRegistry.size;
+  if (!node) return { connectedPeers: 0, score: 'poor' };
   const connectedPeers = node.transport.connections.size;
 
   let score = 'poor';
-  if (decoysEnabled && registrySize > 0 && connectedPeers > 0) {
-    score = (connectedPeers >= 3 && registrySize >= 3) ? 'good' : 'fair';
-  } else if (decoysEnabled && connectedPeers > 0) {
-    score = 'fair';
-  }
+  if (connectedPeers >= 3) score = 'good';
+  else if (connectedPeers > 0) score = 'fair';
 
-  return { decoysEnabled, registrySize, connectedPeers, score };
+  return { connectedPeers, score };
 }
 
 // ── Bootstrap Peers ─────────────────────────────────────────────────────────

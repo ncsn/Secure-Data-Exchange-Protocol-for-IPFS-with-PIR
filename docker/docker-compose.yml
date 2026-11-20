@@ -1,10 +1,11 @@
 # 3-node baseline (BITSWAP_FLOOD_FORWARD=1, star topology, no chain hops):
 #
 #   bench(host) ──► owner
-#   bench(host) ──► cache ──► owner
+#                   owner ◄── peer1 (DHT participant)
 #
 # Flood forwarding is enabled but produces no extra hops here because there
-# is no intermediate peer. This is the baseline for the scaling comparison.
+# is no intermediate peer between bench and owner. This is the baseline for
+# the scaling comparison.
 
 services:
   owner:
@@ -15,20 +16,21 @@ services:
       - ROLE=owner
       - PORT=4001
       - ANNOUNCE_IP=owner
+      - BENCH_HMAC_KEY=bench-hmac-key-32-bytes-padding!!
       - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4001:4001"
     volumes:
       - shared:/shared
 
-  cache:
+  peer1:
     build:
       context: ..
       dockerfile: docker/Dockerfile
     environment:
-      - ROLE=cache
+      - ROLE=peer
       - PORT=4002
-      - ANNOUNCE_IP=cache
+      - ANNOUNCE_IP=peer1
       - OWNER_HOST=owner
       - OWNER_PORT=4001
       - BITSWAP_FLOOD_FORWARD=1
@@ -47,15 +49,15 @@ services:
       - ROLE=requester
       - PORT=4003
       - ANNOUNCE_IP=requester
-      - CACHE_HOST=cache
-      - CACHE_PORT=4002
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
       - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4003:4003"
     volumes:
       - shared:/shared
     depends_on:
-      - cache
+      - owner
 
 volumes:
   shared:

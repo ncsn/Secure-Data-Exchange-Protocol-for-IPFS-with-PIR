@@ -14,23 +14,14 @@
  *   Privacy protocol:
  *     6. Full 4-step privacy handshake: A retrieves private object from B
  *     7. Privacy handshake rejects if requester sends wrong CID¹
- *   Decoy:
- *     8. Decoy request completes without error and discards response
- *   Encrypted Caching:
- *     9.  Cache population: C caches object from owner B
- *     10. Cache retrieval: A gets object from cache node C
- *     11. Cache retrieval rejects forged authorization
- *     12. Cache retrieval with wrong CID¹ fails integrity check
  *   Freshness & Expiry:
- *     13. Two PRIVACY_CHALLENGE signatures differ (nonce freshness)
- *     14. Cache retrieval rejects expired timestamp
+ *     8. Two PRIVACY_CHALLENGE signatures differ (nonce freshness)
  *   Security hardening:
- *     15. decode() rejects truncated / malformed buffers
- *     16. DONT_HAVE from wrong peer is ignored (spoofing protection)
- *     17. Decoy response size is capped at 1 MiB
- *     18. PRIVACY_CHALLENGE with truncated payload is rejected
- *     19. _pending map rejects requests beyond MAX_PENDING (1024)
- *     20. Replayed PRIVACY_RESPONSE is silently ignored (pending consumed)
+ *     9.  decode() rejects truncated / malformed buffers
+ *     10. DONT_HAVE from wrong peer is ignored (spoofing protection)
+ *     11. PRIVACY_CHALLENGE with truncated payload is rejected
+ *     12. _pending map rejects requests beyond MAX_PENDING (1024)
+ *     13. Replayed PRIVACY_RESPONSE is silently ignored (pending consumed)
  */
 
 import fs   from 'fs';
@@ -43,11 +34,7 @@ import { BlockStore }                             from '../blockstore/blockstore
 import { TCPTransport }                           from '../libp2p/transport.js';
 import { PeerId }                                 from '../libp2p/peer.js';
 import { randomAesKey }                              from '../libp2p/crypto.js';
-import { hash }                                      from '../cid/crypto.js';
 import { randomBytes }                               from 'crypto';
-import { tripleHash }                             from '../cid/cid.js';
-import { serialize as serializeDAG }              from '../dag/node.js';
-import { importData }                             from '../dag/dag.js';
 
 // ── Harness ───────────────────────────────────────────────────────────────────
 
@@ -250,7 +237,6 @@ async function run() {
     const { cid1, cid3 } = bsB.registerOwned(objData);
 
     // A knows CID³ (public) and CID¹ digest (from having CID¹)
-    const K           = randomAesKey();
     const cid1Digest  = cid1.digest;
 
     // A requests via privacy protocol
@@ -268,7 +254,6 @@ async function run() {
 
     // A sends a wrong CID¹ (random bytes) — B will send DONT_HAVE back
     const wrongCid1 = Buffer.alloc(32, 0xff);
-    const K         = randomAesKey();
 
     let threw = false;
     try {
@@ -284,132 +269,24 @@ async function run() {
     assert(threw, 'Expected privacy request with wrong CID¹ to fail');
   });
 
-  console.log('\n  [Decoy]\n');
-
-  // 8. Decoy request completes via full handshake (WANT_HAVE → PRIVACY_CHALLENGE → PRIVACY_RESPONSE → PRIVACY_BLOCK)
-  // All message types are identical to a real privacy request — wire indistinguishable
-  await test('Decoy request completes silently without error', async () => {
-    const { bsA, bsB, connA } = await makePair();
-
-    // B owns an object so it responds to WANT_HAVE with PRIVACY_CHALLENGE
-    const objData = Buffer.from('object for decoy test');
-    const { cid3 } = bsB.registerOwned(objData);
-
-    // A sends a decoy through the full protocol flow
-    await bsA.sendDecoy(cid3.string, connA);
-  });
-
-  console.log('\n  [Encrypted Caching]\n');
-
-  // 9. Cache population: C caches from owner B
-  await test('Cache population: C caches object from owner B', async () => {
-    const { bsB, bsC, connCtoB } = await makeTriple();
-
-    // B owns an object
-    const objData = Buffer.from('cached object data for the network');
-    const { cid3 } = bsB.registerOwned(objData);
-
-    // C requests to cache from B
-    await bsC.requestCache(cid3.string, connCtoB);
-
-    // Verify C has an entry in _cached
-    assert(bsC.hasCached(cid3.string), 'C should have cached the object');
-  });
-
-  // 10. Cache retrieval: A gets from cache C
-  await test('Cache retrieval: A gets object from cache node C', async () => {
-    const { bsA, bsB, bsC, connCtoB, connAtoC } = await makeTriple();
-
-    // B owns an object
-    const objData = Buffer.from('object to be cached and retrieved');
-    const { cid1, cid3 } = bsB.registerOwned(objData);
-
-    // C caches from B
-    await bsC.requestCache(cid3.string, connCtoB);
-    assert(bsC.hasCached(cid3.string), 'C should have cached the object');
-
-    // A retrieves from cache C
-    const K = randomAesKey();
-    const received = await bsA.requestFromCache(cid3.string, cid1.digest, K, connAtoC);
-
-    assert(received.equals(objData), 'Cache retrieval: received object does not match original');
-  });
-
-  // 11. Cache retrieval rejects forged authorization
-  await test('Cache retrieval rejects forged authorization signature', async () => {
-    const { bsA, bsC, connCtoB, connAtoC, bsB } = await makeTriple();
-
-    // B owns an object
-    const objData = Buffer.from('object with forged auth test');
-    const { cid1, cid3 } = bsB.registerOwned(objData);
-
-    // C caches from B
-    await bsC.requestCache(cid3.string, connCtoB);
-
-    // Tamper with the authorization in C's cache
-    const cached = bsC._cached.get(cid3.string);
-    cached.authorization = randomBytes(cached.authorization.length); // forge it
-
-    // A tries to retrieve — should fail authorization verification
-    const K = randomAesKey();
-    let threw = false;
-    try {
-      await bsA.requestFromCache(cid3.string, cid1.digest, K, connAtoC);
-    } catch (e) {
-      threw = true;
-      assert(
-        e.message.includes('authorization') || e.message.includes('verification'),
-        `Unexpected error: ${e.message}`
-      );
-    }
-    assert(threw, 'Expected forged authorization to be rejected');
-  });
-
-  // 12. Cache retrieval with wrong CID¹ fails integrity check
-  await test('Cache retrieval with wrong CID¹ fails integrity check', async () => {
-    const { bsA, bsB, bsC, connCtoB, connAtoC } = await makeTriple();
-
-    // B owns an object
-    const objData = Buffer.from('object for wrong cid1 cache test');
-    const { cid3 } = bsB.registerOwned(objData);
-
-    // C caches from B
-    await bsC.requestCache(cid3.string, connCtoB);
-
-    // A tries to retrieve with wrong CID¹ — inner decryption will fail
-    const wrongCid1 = randomBytes(32);
-    const K = randomAesKey();
-    let threw = false;
-    try {
-      await bsA.requestFromCache(cid3.string, wrongCid1, K, connAtoC);
-    } catch (e) {
-      threw = true;
-      assert(
-        e.message.includes('decrypt') || e.message.includes('hash') || e.message.includes('authorization'),
-        `Unexpected error: ${e.message}`
-      );
-    }
-    assert(threw, 'Expected wrong CID¹ to fail in cache retrieval');
-  });
-
   console.log('\n  [Freshness & Expiry]\n');
 
-  // 13. Two PRIVACY_CHALLENGE signatures differ (nonce freshness)
+  // 8. Two PRIVACY_CHALLENGE signatures differ (nonce freshness)
   await test('Two PRIVACY_CHALLENGE signatures differ (nonce freshness)', async () => {
     const { bsA, bsB, connA, storeB } = await makePair();
 
     const objData = Buffer.from('nonce freshness test object');
-    const { cid1, cid3 } = bsB.registerOwned(objData);
+    const k = randomAesKey();
+    const { cid1, cid3 } = bsB.registerOwned(objData, k);
 
     // Collect two PRIVACY_CHALLENGE payloads by doing two full handshakes
-    const K1 = randomAesKey();
     const received1 = await bsA.requestPrivate(cid3.string, cid1.digest, connA);
     assert(received1.equals(objData), 'First retrieval should succeed');
 
-    // Second retrieval — new pair needed because pending state is consumed
+    // Second retrieval — new pair needed because pending state is consumed.
+    // Reuse the same key k so the owner derives the identical CID³.
     const { bsA: bsA2, bsB: bsB2, connA: connA2 } = await makePair();
-    bsB2.registerOwned(objData);
-    const K2 = randomAesKey();
+    bsB2.registerOwned(objData, k);
     const received2 = await bsA2.requestPrivate(cid3.string, cid1.digest, connA2);
     assert(received2.equals(objData), 'Second retrieval should succeed');
 
@@ -418,41 +295,9 @@ async function run() {
     // completes successfully twice (signature is not a static replay).
   });
 
-  // 14. Cache retrieval rejects expired timestamp
-  await test('Cache retrieval rejects expired timestamp', async () => {
-    const { bsA, bsB, bsC, connCtoB, connAtoC } = await makeTriple();
-
-    const objData = Buffer.from('expiry test object for cache');
-    const { cid1, cid3 } = bsB.registerOwned(objData);
-
-    // C caches from B
-    await bsC.requestCache(cid3.string, connCtoB);
-    assert(bsC.hasCached(cid3.string), 'C should have cached the object');
-
-    // Tamper with the timestamp in C's cache to make it expired (48h ago)
-    const cached = bsC._cached.get(cid3.string);
-    const blob = cached.encryptedBlob;
-    const expiredTs = BigInt(Date.now() - 48 * 60 * 60 * 1000); // 48h ago
-    blob.writeBigUInt64BE(expiredTs, blob.length - 8);
-
-    // A tries to retrieve — should fail with expiry error
-    const K = randomAesKey();
-    let threw = false;
-    try {
-      await bsA.requestFromCache(cid3.string, cid1.digest, K, connAtoC);
-    } catch (e) {
-      threw = true;
-      assert(
-        e.message.includes('expired') || e.message.includes('decrypt'),
-        `Unexpected error: ${e.message}`
-      );
-    }
-    assert(threw, 'Expected expired cache to be rejected');
-  });
-
   console.log('\n  [Security Hardening]\n');
 
-  // 15. decode() rejects truncated / malformed buffers
+  // 9. decode() rejects truncated / malformed buffers
   await test('decode() rejects truncated and malformed buffers', () => {
     // Completely empty
     let threw = false;
@@ -503,7 +348,7 @@ async function run() {
     assert(threw, 'Expected decode to throw on non-Buffer input');
   });
 
-  // 16. DONT_HAVE from wrong peer is ignored (spoofing protection)
+  // 10. DONT_HAVE from wrong peer is ignored (spoofing protection)
   await test('DONT_HAVE from wrong peer is ignored — block still arrives', async () => {
     // Setup: A ↔ B (B has the block) and A ↔ C (attacker)
     const { bsA, bsB, bsC, storeB, connAtoC, connCtoB, connCfromA, peerC } = await makeTriple();
@@ -535,55 +380,7 @@ async function run() {
     assert(received.equals(data), 'Block should arrive despite spoofed DONT_HAVE');
   });
 
-  // 17. Decoy response size is capped at 1 MiB
-  await test('Decoy response size is capped (does not OOM with huge sizeHint)', async () => {
-    const { bsA, bsB, connA } = await makePair();
-
-    // B owns an object so the protocol works
-    const objData = Buffer.from('object for decoy size cap test');
-    const { cid3 } = bsB.registerOwned(objData);
-
-    // Send a normal decoy — just verify it completes without error.
-    // The cap is 1 MiB on the owner side; normal decoys request 256-1280 bytes.
-    // The key assertion is that the protocol completes successfully.
-    await bsA.sendDecoy(cid3.string, connA);
-
-    // Now test with a forged payload: inject DECOY_REQUEST with a huge sizeHint
-    // directly into the provider's handler to verify the cap works.
-    const DECOY_FLAG = Buffer.from('DECOY_TRIPLE_HSH');
-    const bigHint = Buffer.alloc(4);
-    bigHint.writeUInt32BE(0xFFFFFFFF, 0); // 4 GiB — absurd
-    const { eciesEncrypt } = await import('../libp2p/crypto.js');
-
-    // Fresh pair — need a peer we can inject into
-    const { bsB: bsB3, connB: connB3 } = await makePair();
-    const objData2 = Buffer.from('object for decoy cap test 2');
-    const { cid3: cid3b } = bsB3.registerOwned(objData2);
-
-    // Intercept _send on bsB3 to capture the outgoing DECOY_BLOCK
-    let capResponseSize = 0;
-    const origSend3 = bsB3._send.bind(bsB3);
-    bsB3._send = (conn, type, cid, payload) => {
-      if (type === MessageType.DECOY_BLOCK) {
-        capResponseSize = payload.length;
-      }
-      origSend3(conn, type, cid, payload);
-    };
-
-    // Forge a decoy with 4 GiB hint
-    const decoyPayload2 = Buffer.concat([DECOY_FLAG, bigHint]);
-    const encrypted2 = eciesEncrypt(decoyPayload2, bsB3.localPeer.publicKey);
-    await bsB3._handleMessage({
-      type: MessageType.DECOY_REQUEST,
-      cid: cid3b.string,
-      payload: encrypted2,
-    }, connB3);
-
-    assert(capResponseSize > 0, 'B should have sent a DECOY_BLOCK response');
-    assert(capResponseSize <= 1024 * 1024, `Response ${capResponseSize} bytes exceeds 1 MiB cap`);
-  });
-
-  // 18. PRIVACY_CHALLENGE with truncated payload is rejected
+  // 11. PRIVACY_CHALLENGE with truncated payload is rejected
   await test('PRIVACY_CHALLENGE with truncated payload is rejected', async () => {
     const { bsA, bsB, connA } = await makePair();
 
@@ -638,7 +435,7 @@ async function run() {
     assert(threw, 'Expected truncated PRIVACY_CHALLENGE to be rejected');
   });
 
-  // 19. _pending map rejects requests beyond MAX_PENDING (1024)
+  // 12. _pending map rejects requests beyond MAX_PENDING (1024)
   await test('_pending map rejects requests beyond MAX_PENDING cap', async () => {
     const peerA  = PeerId.create();
     const storeA = new BlockStore(tmpDir());
@@ -688,7 +485,7 @@ async function run() {
     bsA._pending.clear();
   });
 
-  // 20. Replayed PRIVACY_RESPONSE is silently ignored (pending consumed)
+  // 13. Replayed PRIVACY_RESPONSE is silently ignored (pending consumed)
   await test('Replayed PRIVACY_RESPONSE is ignored after first use', async () => {
     const { bsA, bsB, connA, connB } = await makePair();
 

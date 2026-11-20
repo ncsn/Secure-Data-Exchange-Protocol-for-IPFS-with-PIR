@@ -15,7 +15,7 @@ import { fileURLToPath } from 'url';
 import { exec }        from 'child_process';
 
 import { Node }              from '../node/node.js';
-import { tripleHash }        from '../cid/cid.js';
+import { hash }              from '../cid/crypto.js';
 import { MessageType,
          MessageTypeName,
          encode }            from '../bitswap/messages.js';
@@ -153,7 +153,7 @@ async function handleAction(name, res) {
 
   if (name === 'add-to-a') {
     const content = Buffer.from(`Hello from Node A — ${new Date().toISOString()}`);
-    const { h1 }  = tripleHash(content);
+    const h1      = hash(content);
     const { cid1, cid2, cid3 } = await nodeA.addBytes(content, { name: 'demo.txt' });
     demoState = { cid1, cid2, cid3, h1, content };
     broadcast('step', {
@@ -206,26 +206,6 @@ async function handleAction(name, res) {
       broadcast('step', { step: 'retrieve-from-d', error: err.message });
       res.end(JSON.stringify({ ok: false, error: err.message }));
     }
-    return;
-  }
-
-  if (name === 'send-decoy') {
-    if (!demoState) {
-      res.end(JSON.stringify({ ok: false, error: 'Add a file first (Step 1)' }));
-      return;
-    }
-    // Pick any connection from D (the farthest node) that leads toward A
-    const conn = [...nodeD.transport.connections.values()][0];
-    if (!conn) {
-      res.end(JSON.stringify({ ok: false, error: 'Node C has no connections yet — retrieve first' }));
-      return;
-    }
-    // Send DECOY_REQUEST directly — bypasses the timing gap in sendDecoy()
-    const decoyPayload = Buffer.alloc(4);
-    decoyPayload.writeUInt32BE(256, 0);
-    conn.sendMessage('/bitswap/1.0', encode(MessageType.DECOY_REQUEST, demoState.cid3, decoyPayload));
-    broadcast('step', { step: 'send-decoy' });
-    res.end(JSON.stringify({ ok: true }));
     return;
   }
 

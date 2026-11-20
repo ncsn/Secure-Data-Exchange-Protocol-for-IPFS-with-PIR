@@ -435,9 +435,6 @@ export class DHTNode extends EventEmitter {
       // The sender vouches for them (either self-announcing or relaying).
       for (const p of peers) {
         this._addProvider(key, p);
-        // Emit cid:seen with the provider's peerId so the decoy registry
-        // can map CID3 → provider for targeted decoy requests
-        this.emit('cid:seen', key, p.peerId);
       }
       return;
     }

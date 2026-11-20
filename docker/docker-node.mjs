@@ -3,8 +3,8 @@
  *
  * Behavior is determined by the ROLE environment variable:
  *   ROLE=owner     — adds a file, publishes CIDs, waits for connections
- *   ROLE=cache     — connects to owner, caches the file, serves it
- *   ROLE=requester — connects to cache, retrieves file, verifies, stays alive
+ *   ROLE=requester — connects to owner, retrieves file via privacy protocol, verifies
+ *   ROLE=peer      — idle DHT participant (for scale testing)
  *
  * CID sharing: Owner writes /shared/cids.json, others poll until it appears.
  *
@@ -62,18 +62,23 @@ async function runOwner() {
   log(`Node started on port ${port}`);
   log(`Peer ID: ${node.id}`);
 
-  // Add a test file
+  // Add a test file — returns k (the HMAC key for CID³ = HMAC_k(CID²))
+  // Use a DETERMINISTIC key so the host-side bench/requester can derive the
+  // same CID³. Must match bench-docker.mjs's BENCH_HMAC_KEY default.
   const content = 'Hello from the Docker Owner node! This file demonstrates the triple-hash privacy protocol.';
-  const result = await node.addBytes(Buffer.from(content), { name: 'hello.txt' });
+  const k = Buffer.from(process.env.BENCH_HMAC_KEY || 'bench-hmac-key-32-bytes-padding!!', 'utf8').slice(0, 32);
+  const result = await node.addBytes(Buffer.from(content), { name: 'hello.txt', k });
 
   log(`File added:`);
   log(`  CID1: ${result.cid1}`);
   log(`  CID3: ${result.cid3}`);
 
-  // Write CIDs to shared volume for other containers
+  // Write CIDs + HMAC key k to shared volume for other containers
+  // k is the secret needed to compute CID³ — only share with trusted requesters
   fs.writeFileSync(SHARED_FILE, JSON.stringify({
     cid1: result.cid1,
     cid3: result.cid3,
+    k:    result.k.toString('hex'),  // 32-byte HMAC key (hex)
     ownerPeerId: node.id,
     content,
   }));
@@ -94,47 +99,6 @@ async function runOwner() {
   setInterval(() => {}, 60000);
 }
 
-// ── CACHE ────────────────────────────────────────────────────────────────────
-
-async function runCache() {
-  const node = new Node({ announceIp: ANNOUNCE_IP });
-  const port = await node.start(PORT);
-  log(`Node started on port ${port}`);
-  log(`Peer ID: ${node.id}`);
-
-  // Wait for owner's CIDs
-  log('Waiting for Owner to add file...');
-  const cids = await waitForCids();
-  log(`Got CIDs — CID3: ${cids.cid3.slice(0, 24)}...`);
-
-  // Connect to owner
-  const ownerHost = process.env.OWNER_HOST || 'owner';
-  const ownerPort = parseInt(process.env.OWNER_PORT || '4001', 10);
-  log(`Connecting to Owner at ${ownerHost}:${ownerPort}...`);
-  const conn = await connectWithRetry(node, ownerHost, ownerPort);
-  log(`Connected to Owner (${conn.remotePeer.id.slice(0, 12)}...)`);
-
-  // Wait for bitswap handshake to settle
-  await new Promise(r => setTimeout(r, 500));
-
-  // Cache the file
-  log('Requesting cache of file from Owner...');
-  await node.cacheFrom(cids.cid3, conn);
-  log(`CACHED SUCCESSFULLY — hasCached: ${node.bitswap.hasCached(cids.cid3)}`);
-
-  console.log('');
-  console.log('╔══════════════════════════════════════════════════════════╗');
-  console.log('║  CACHE NODE READY — Serving encrypted cached content    ║');
-  console.log(`║  Port: ${String(port).padEnd(49)}║`);
-  console.log('║                                                        ║');
-  console.log('║  Connect from Desktop app → Peers → localhost:4002     ║');
-  console.log('╚══════════════════════════════════════════════════════════╝');
-  console.log('');
-
-  // Keep alive
-  setInterval(() => {}, 60000);
-}
-
 // ── REQUESTER ────────────────────────────────────────────────────────────────
 
 async function runRequester() {
@@ -148,23 +112,20 @@ async function runRequester() {
   const cids = await waitForCids();
   log(`Got CIDs — CID1: ${cids.cid1.slice(0, 24)}...`);
 
-  // Wait a bit for cache node to be ready
-  await new Promise(r => setTimeout(r, 2000));
-
-  // Connect to cache
-  const cacheHost = process.env.CACHE_HOST || 'cache';
-  const cachePort = parseInt(process.env.CACHE_PORT || '4002', 10);
-  log(`Connecting to Cache at ${cacheHost}:${cachePort}...`);
-  const conn = await connectWithRetry(node, cacheHost, cachePort);
-  log(`Connected to Cache (${conn.remotePeer.id.slice(0, 12)}...)`);
+  // Connect to owner
+  const ownerHost = process.env.OWNER_HOST || 'owner';
+  const ownerPort = parseInt(process.env.OWNER_PORT || '4001', 10);
+  log(`Connecting to Owner at ${ownerHost}:${ownerPort}...`);
+  const conn = await connectWithRetry(node, ownerHost, ownerPort);
+  log(`Connected to Owner (${conn.remotePeer.id.slice(0, 12)}...)`);
 
   // Wait for bitswap handshake
   await new Promise(r => setTimeout(r, 500));
 
-  // Retrieve from cache
-  log('Retrieving file from Cache node (not from Owner!)...');
+  // Retrieve via privacy protocol (4-step handshake)
+  log('Retrieving file from Owner via privacy protocol...');
   const cid1 = cidFromString(cids.cid1);
-  const data = await node.getFromCache(cids.cid3, cid1.digest, conn);
+  const data = await node.bitswap.requestPrivate(cids.cid3, cid1.digest, conn);
 
   // Verify
   const retrieved = data.toString();
@@ -176,18 +137,16 @@ async function runRequester() {
   console.log('');
   console.log('╔══════════════════════════════════════════════════════════╗');
   if (match) {
-    console.log('║  ✓ PASS — Encrypted caching protocol works!             ║');
+    console.log('║  ✓ PASS — Privacy protocol works!                       ║');
   } else {
     console.log('║  ✗ FAIL — Content mismatch!                             ║');
   }
   console.log('║                                                        ║');
-  console.log('║  • Owner added file                                    ║');
-  console.log('║  • Cache node cached it (encrypted, never knew CID1)   ║');
-  console.log('║  • Requester retrieved from cache (not from owner)     ║');
-  console.log('║  • Content verified: hash matches CID1                 ║');
+  console.log('║  • Owner added file (CID³ = HMAC_k(CID²))             ║');
+  console.log('║  • 4-step ECDSA + DH privacy handshake completed       ║');
+  console.log('║  • Content verified: hash matches CID¹                 ║');
   console.log('║                                                        ║');
   console.log(`║  Requester port: ${String(port).padEnd(39)}║`);
-  console.log('║  Connect from Desktop app → Peers → localhost:4003     ║');
   console.log('╚══════════════════════════════════════════════════════════╝');
   console.log('');
 
@@ -211,7 +170,7 @@ async function runPeer() {
   // When set, this peer connects ONLY to CHAIN_NEXT_HOST (its upstream in the
   // chain), NOT to the owner. Combined with BITSWAP_FLOOD_FORWARD=1, this
   // forces every WANT_HAVE to traverse the whole chain until it reaches a
-  // node that actually owns/caches the content — producing measurable per-hop
+  // node that actually owns the content — producing measurable per-hop
   // latency in bench-docker.mjs.
   const chainNextHost = process.env.CHAIN_NEXT_HOST;
   if (chainNextHost) {
@@ -220,24 +179,12 @@ async function runPeer() {
     const c = await connectWithRetry(node, chainNextHost, chainNextPort);
     log(`Chain hop established (${c.remotePeer.id.slice(0, 12)}...)`);
   } else {
-    // Default (star) behavior — connect to owner (+ optionally cache) directly.
+    // Default (star) behavior — connect to owner directly.
     const ownerHost = process.env.OWNER_HOST || 'owner';
     const ownerPort = parseInt(process.env.OWNER_PORT || '4001', 10);
     log(`Connecting to Owner at ${ownerHost}:${ownerPort}...`);
     const conn = await connectWithRetry(node, ownerHost, ownerPort);
     log(`Connected to Owner (${conn.remotePeer.id.slice(0, 12)}...)`);
-
-    if (process.env.CACHE_HOST) {
-      try {
-        const cacheHost = process.env.CACHE_HOST;
-        const cachePort = parseInt(process.env.CACHE_PORT || '4002', 10);
-        log(`Connecting to Cache at ${cacheHost}:${cachePort}...`);
-        const c = await connectWithRetry(node, cacheHost, cachePort, 10);
-        log(`Connected to Cache (${c.remotePeer.id.slice(0, 12)}...)`);
-      } catch (e) {
-        log(`Cache connection failed (ok, not required): ${e.message}`);
-      }
-    }
   }
 
   console.log('');
@@ -252,11 +199,11 @@ async function runPeer() {
 
 log(`Starting as ${ROLE}...`);
 
-const runners = { owner: runOwner, cache: runCache, requester: runRequester, peer: runPeer };
+const runners = { owner: runOwner, requester: runRequester, peer: runPeer };
 const runner = runners[ROLE];
 
 if (!runner) {
-  console.error(`Unknown ROLE: ${ROLE}. Use owner, cache, or requester.`);
+  console.error(`Unknown ROLE: ${ROLE}. Use owner, requester, or peer.`);
   process.exit(1);
 }
 

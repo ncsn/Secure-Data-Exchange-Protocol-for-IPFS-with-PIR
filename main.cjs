@@ -106,10 +106,10 @@ ipcMain.handle('ipfs:add', async (_event, filePath) => {
 });
 
 // File get
-ipcMain.handle('ipfs:get', async (_event, cid1) => {
+ipcMain.handle('ipfs:get', async (_event, cid1, kHex) => {
   const ctrl = getController();
   if (!ctrl) return { ok: false, error: 'Controller not loaded' };
-  return ctrl.getFile(cid1);
+  return ctrl.getFile(cid1, kHex);
 });
 
 // Open file dialog
@@ -154,37 +154,6 @@ ipcMain.handle('config:get', async () => {
   const ctrl = getController();
   if (!ctrl) return {};
   return ctrl.getConfig();
-});
-
-// Cache operations
-ipcMain.handle('cache:store', async (_event, cid3, peerId) => {
-  const ctrl = getController();
-  if (!ctrl) return { ok: false, error: 'Controller not loaded' };
-  return ctrl.cacheFromPeer(cid3, peerId);
-});
-
-ipcMain.handle('cache:list', async () => {
-  const ctrl = getController();
-  if (!ctrl) return [];
-  return ctrl.getCachedItems();
-});
-
-ipcMain.handle('cache:remove', async (_event, cid3) => {
-  const ctrl = getController();
-  if (!ctrl) return { ok: false, error: 'Controller not loaded' };
-  return ctrl.removeCached(cid3);
-});
-
-// Decoy operations
-ipcMain.handle('decoys:set', async (_event, enabled) => {
-  const ctrl = getController();
-  if (ctrl) ctrl.setDecoysEnabled(enabled);
-});
-
-ipcMain.handle('decoys:send', async () => {
-  const ctrl = getController();
-  if (!ctrl) return { ok: false, error: 'Controller not loaded' };
-  return ctrl.sendDecoy();
 });
 
 // DHT operations
@@ -258,7 +227,7 @@ ipcMain.handle('bandwidth:stats', async () => {
 
 ipcMain.handle('privacy:score', async () => {
   const ctrl = getController();
-  if (!ctrl) return { decoysEnabled: false, registrySize: 0, connectedPeers: 0, score: 'poor' };
+  if (!ctrl) return { connectedPeers: 0, score: 'poor' };
   return ctrl.getPrivacyScore();
 });
 

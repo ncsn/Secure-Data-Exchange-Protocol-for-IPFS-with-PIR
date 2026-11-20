@@ -16,7 +16,7 @@ contextBridge.exposeInMainWorld('ipfs', {
 
   // ── File operations ───────────────────────────────────────────────────────
   addFile: (filePath) => ipcRenderer.invoke('ipfs:add', filePath),
-  getFile: (cid1)    => ipcRenderer.invoke('ipfs:get', cid1),
+  getFile: (cid1, kHex) => ipcRenderer.invoke('ipfs:get', cid1, kHex),
 
   // ── Peer operations ──────────────────────────────────────────────────────
   getPeers:        ()          => ipcRenderer.invoke('peers:list'),
@@ -25,15 +25,6 @@ contextBridge.exposeInMainWorld('ipfs', {
 
   // ── Config ───────────────────────────────────────────────────────────────
   getConfig: () => ipcRenderer.invoke('config:get'),
-
-  // ── Cache operations ──────────────────────────────────────────────────────
-  cacheFromPeer:  (cid3, peerId) => ipcRenderer.invoke('cache:store', cid3, peerId),
-  getCachedItems: ()             => ipcRenderer.invoke('cache:list'),
-  removeCached:   (cid3)         => ipcRenderer.invoke('cache:remove', cid3),
-
-  // ── Decoy operations ────────────────────────────────────────────────────
-  setDecoysEnabled: (enabled) => ipcRenderer.invoke('decoys:set', enabled),
-  sendDecoy:        ()        => ipcRenderer.invoke('decoys:send'),
 
   // ── DHT operations ─────────────────────────────────────────────────────
   getDHTStats:     ()    => ipcRenderer.invoke('dht:stats'),

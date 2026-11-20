@@ -6,7 +6,6 @@
  *   1. Standard block exchange (want-list, HAVE/BLOCK responses)
  *   2. Per-peer ledgers (bytes sent vs received — incentive layer)
  *   3. Privacy protocol handshake (Steps 1–4 from the research paper)
- *   4. Decoy requests
  *
  * ── Architecture ──────────────────────────────────────────────────────────────
  *
@@ -59,29 +58,19 @@ import { MessageType, MessageTypeName, encode, decode } from './messages.js';
 import { sign, verify, eciesDecrypt, eciesEncrypt,
          aesEncrypt, aesDecrypt,
          generateDHKeyPair, computeDHSecret }           from '../libp2p/crypto.js';
-import { serialize as serializeDAG,
-         deserialize as deserializeDAG }                from '../dag/node.js';
 import { tripleHash }                                   from '../cid/cid.js';
 import { hash }                                         from '../cid/crypto.js';
-import { createPublicKey, createHash }                  from 'crypto';
+import { createHash }                                    from 'crypto';
 
 const BITSWAP_PROTO = '/bitswap/1.0';
-
-/** Cached objects expire after 24 hours. Cache nodes drop expired entries. */
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Maximum concurrent pending requests to prevent memory exhaustion */
 const MAX_PENDING = 1024;
 
-/** 16-byte magic value embedded in DECOY_REQUEST payloads.
- *  Owner B decrypts the ECIES payload and checks for this prefix to distinguish
- *  decoy requests from real PRIVACY_RESPONSE messages. */
-const DECOY_FLAG = Buffer.from('DECOY_TRIPLE_HSH'); // exactly 16 bytes
-
 /** ── Flood forwarding (opt-in) ─────────────────────────────────────────────────
  *
  * When BITSWAP_FLOOD_FORWARD=1, an intermediate node that receives a WANT_HAVE
- * for a CID it does not own / has not cached / does not have in its store will:
+ * for a CID it does not own / does not have in its store will:
  *   1. Broadcast WANT_HAVE to every OTHER connected peer (excluding origin)
  *   2. Record the origin connection in _forwardTable so replies can be routed back
  *   3. Forward all subsequent protocol messages for that CID in both directions
@@ -132,18 +121,13 @@ export class BitswapEngine extends EventEmitter {
     // Populated when this node adds a file it owns.
     this._owned     = new Map();
 
-    // encrypted cache: cid3.string → { encryptedBlob, authorization, ownerPubKeyRaw, timestamp }
-    // Populated when this node caches content from an owner.
-    // encryptedBlob = AES(OBJ, H(CID¹)) || timestamp — cannot be decrypted by cache node.
-    this._cached    = new Map();
-
     // ── Flood forwarding state (only used when FLOOD_FORWARD_ENABLED) ─────────
     // _forwardTable: cid → { origin: Connection, holder: Connection|null,
     //                        fanout: Set<Connection>, ts: number }
     //   origin  = the connection the initial WANT_HAVE arrived from (replies go there)
-    //   holder  = set to the first peer that responded HAVE/PRIVACY_CHALLENGE/CACHE_CHALLENGE
-    //             (subsequent client-side follow-ups such as WANT_BLOCK / PRIVACY_RESPONSE /
-    //              CACHE_REQUEST / DECOY_REQUEST from `origin` are forwarded to `holder`)
+    //   holder  = set to the first peer that responded HAVE/PRIVACY_CHALLENGE
+    //             (subsequent client-side follow-ups such as WANT_BLOCK / PRIVACY_RESPONSE
+    //              from `origin` are forwarded to `holder`)
     //   fanout  = the connections we broadcast to (used to send DONT_HAVE upstream
     //             only after ALL downstream peers replied DONT_HAVE)
     //   ts      = insertion time; entries older than FORWARD_TTL_MS are pruned
@@ -236,22 +220,30 @@ export class BitswapEngine extends EventEmitter {
   // ── Ownership registration ────────────────────────────────────────────────
 
   /**
-   * registerOwned(data) — register raw object data as owned by this node
+   * registerOwned(data, k) — register raw object data as owned by this node
    *
    * Computes the triple hash and stores the private mapping
-   * cid3 → { cid1, cid2, h1, data } so we can respond to privacy requests.
+   * cid3 → { cid1, cid2, h1, h2, k } so we can respond to privacy requests.
    *
-   * @param {Buffer} data — raw object bytes
-   * @returns {{ cid1, cid2, cid3 }} the three CIDs
+   * The HMAC key k is used to compute CID³ = HMAC_k(CID²). It must be kept
+   * secret by the owner; it is delivered to requesters out-of-band (alongside
+   * CID³ — e.g. via the DHT record or a shared channel), NOT during the Bitswap
+   * handshake. If k is omitted, a fresh random 32-byte key
+   * is generated automatically.
+   *
+   * @param {Buffer}        data — raw object bytes
+   * @param {Buffer|string} [k]  — 32-byte HMAC key (generated if omitted)
+   * @returns {{ cid1, cid2, cid3, k }} the three CIDs and the HMAC key
    */
-  registerOwned(data) {
-    const { cid1, cid2, cid3, h1, h2 } = tripleHash(data);
+  registerOwned(data, k) {
+    const hmacKey = k ? (Buffer.isBuffer(k) ? k : Buffer.from(k)) : randomBytes(32);
+    const { cid1, cid2, cid3, h1, h2 } = tripleHash(data, hmacKey);
     // Store only metadata — do NOT keep full bytes in memory (unbounded growth risk).
     // Raw data is persisted in the block store below and fetched on demand when serving.
-    this._owned.set(cid3.string, { cid1, cid2, h1, h2 });
+    this._owned.set(cid3.string, { cid1, cid2, h1, h2, k: hmacKey });
     // Also store raw data under cid1 so wantBlock / getPublic can serve it
     this.store.put(cid1.string, data);
-    return { cid1, cid2, cid3 };
+    return { cid1, cid2, cid3, k: hmacKey };
   }
 
   // ── Standard Bitswap: requester side ─────────────────────────────────────
@@ -326,132 +318,6 @@ export class BitswapEngine extends EventEmitter {
     });
   }
 
-  // ── Decoy request (Node A) ────────────────────────────────────────────────
-
-  /**
-   * sendDecoy(cid3String, conn) → Promise<void>
-   *
-   * Sends a decoy request — appears identical to a real privacy request
-   * to any outside observer, but includes a decoy flag instead of a real CID¹.
-   * The owner recognises the flag and sends back random bits.
-   *
-   * @param {string}     cid3String — CID³ of any existing object
-   * @param {Connection} conn
-   * @returns {Promise<void>}
-   */
-  sendDecoy(cid3String, conn) {
-    return new Promise((resolve, reject) => {
-      if (this._pending.size >= MAX_PENDING) {
-        return reject(new Error('Too many pending requests'));
-      }
-      // If there's already a pending decoy for this CID3, skip to avoid key collision
-      if (this._pending.has(cid3String + ':decoy')) {
-        return resolve(); // silently succeed — previous decoy is in-flight
-      }
-      this._send(conn, MessageType.WANT_HAVE, cid3String);
-
-      const timeout = setTimeout(() => {
-        this._pending.delete(cid3String + ':decoy');
-        reject(new Error('Decoy request timeout'));
-      }, 15000);
-
-      this._pending.set(cid3String + ':decoy', {
-        peerId: conn.remotePeer.id,
-        conn,
-        timeout,
-        isDecoy: true,
-        cid3String,
-        resolve,
-        reject,
-      });
-    });
-  }
-
-  // ── Encrypted caching: cache population (Node C → Owner B) ────────────────
-
-  /**
-   * requestCache(cid3String, conn) → Promise<void>
-   *
-   * Cache node C asks owner B to cache an object.
-   * Steps 1–2 reuse WANT_HAVE / PRIVACY_CHALLENGE (same wire messages).
-   * Step 3: C sends CACHE_REQUEST with ecies(K + C_pubkey, B_pubkey)
-   * Step 4: B responds with CACHE_RESPONSE containing the encrypted blob + authorization
-   *
-   * The cached blob is encrypted with H(CID¹) — C never learns CID¹.
-   *
-   * @param {string}     cid3String — CID³ of the object to cache
-   * @param {Connection} conn       — connection to owner B
-   * @returns {Promise<void>} resolves when cache entry is stored
-   */
-  requestCache(cid3String, conn) {
-    return new Promise((resolve, reject) => {
-      if (this._pending.size >= MAX_PENDING) {
-        return reject(new Error('Too many pending requests'));
-      }
-      // Step 1: WANT_HAVE(CID³) — same as privacy request
-      this._send(conn, MessageType.WANT_HAVE, cid3String);
-
-      const timeout = setTimeout(() => {
-        this._pending.delete(cid3String + ':cache');
-        reject(new Error(`Cache request timeout for: ${cid3String.slice(0, 20)}...`));
-      }, 15000);
-
-      this._pending.set(cid3String + ':cache', {
-        peerId: conn.remotePeer.id,
-        conn,
-        timeout,
-        isCachePopulation: true,
-        cid3String,
-        resolve,
-        reject,
-      });
-    });
-  }
-
-  // ── Encrypted caching: cache retrieval (Node A → Cache C) ─────────────────
-
-  /**
-   * requestFromCache(cid3String, cid1Digest, K, conn) → Promise<Buffer>
-   *
-   * Requester A gets an object from cache node C.
-   * Step 5: A sends WANT_HAVE(CID³)
-   * Step 6: C responds with CACHE_CHALLENGE (authorization + B_pub + C_pub)
-   * Step 7: A verifies authorization, sends CACHE_REQUEST ecies(K, C_pubkey)
-   * Step 8: C responds with CACHE_BLOCK AES_K(cached_blob)
-   * Step 9: A decrypts outer with K, inner with H(CID¹), verifies integrity
-   *
-   * @param {string} cid3String   — CID³ string
-   * @param {Buffer} cid1Digest   — raw H(OBJ), used to decrypt inner layer + verify
-   * @param {Buffer} K            — 32-byte AES session key generated by A
-   * @param {Connection} conn     — connection to cache node C
-   * @returns {Promise<Buffer>} the decrypted object bytes
-   */
-  requestFromCache(cid3String, cid1Digest, K, conn) {
-    return new Promise((resolve, reject) => {
-      if (this._pending.size >= MAX_PENDING) {
-        return reject(new Error('Too many pending requests'));
-      }
-      // Step 5: WANT_HAVE(CID³)
-      this._send(conn, MessageType.WANT_HAVE, cid3String);
-
-      const timeout = setTimeout(() => {
-        this._pending.delete(cid3String + ':fromcache');
-        reject(new Error(`Cache retrieval timeout for: ${cid3String.slice(0, 20)}...`));
-      }, 15000);
-
-      this._pending.set(cid3String + ':fromcache', {
-        peerId: conn.remotePeer.id,
-        conn,
-        timeout,
-        isCacheRetrieval: true,
-        cid1Digest,
-        K,
-        resolve,
-        reject,
-      });
-    });
-  }
-
   // ── Message handler (incoming) ────────────────────────────────────────────
 
   /**
@@ -478,10 +344,6 @@ export class BitswapEngine extends EventEmitter {
         MessageType.BLOCK,
         MessageType.PRIVACY_CHALLENGE,
         MessageType.PRIVACY_BLOCK,
-        MessageType.CACHE_CHALLENGE,
-        MessageType.CACHE_BLOCK,
-        MessageType.CACHE_RESPONSE,
-        MessageType.DECOY_BLOCK,
       ];
       if (upstreamResponseTypes.includes(type)) {
         // Only intercept if the message is coming from a peer we broadcast to
@@ -498,8 +360,6 @@ export class BitswapEngine extends EventEmitter {
       const downstreamClientTypes = [
         MessageType.WANT_BLOCK,
         MessageType.PRIVACY_RESPONSE,
-        MessageType.CACHE_REQUEST,
-        MessageType.DECOY_REQUEST,
       ];
       if (downstreamClientTypes.includes(type)) {
         const entry = this._forwardTable.get(cid);
@@ -551,49 +411,6 @@ export class BitswapEngine extends EventEmitter {
         this._send(conn, MessageType.PRIVACY_CHALLENGE, cid, packed);
         ledger.bytesSent += packed.length;
 
-      } else if (this._cached.has(cid)) {
-        // Cache node serving — Step 6: send CACHE_CHALLENGE
-        const cached = this._cached.get(cid);
-
-        // Check TTL — drop expired cache entries
-        if (cached.timestamp && Date.now() - cached.timestamp > CACHE_TTL_MS) {
-          this._cached.delete(cid);
-          this.emit('error', new Error(`Cache expired for ${cid.slice(0, 20)}…`));
-          this._send(conn, MessageType.DONT_HAVE, cid);
-          return;
-        }
-
-        // Payload: [ auth_len(2) | auth | ownerPubKeyLen(2) | ownerPubKey | cachePubKeyLen(2) | cachePubKey | Gc'(65) ]
-        // Per paper §III (line 141): C's response includes "the authorization
-        // received from B, along with B's and C's public keys to make the
-        // signature verifiable." The signature is over (CID² ‖ PKC ‖ Gc'),
-        // so Gc' MUST also be sent so A can reconstruct the signed data.
-        const cachePubKey = this.localPeer.publicKeyRaw;
-        const cacheGprime = cached.cacheGprime;
-        if (!cacheGprime || cacheGprime.length !== 65) {
-          // Cached entry is from an old code path without Gc' — cannot serve.
-          this._cached.delete(cid);
-          this._send(conn, MessageType.DONT_HAVE, cid);
-          return;
-        }
-        const challengePayload = Buffer.alloc(
-          2 + cached.authorization.length +
-          2 + cached.ownerPubKeyRaw.length +
-          2 + cachePubKey.length +
-          cacheGprime.length
-        );
-        let off = 0;
-        challengePayload.writeUInt16BE(cached.authorization.length, off); off += 2;
-        cached.authorization.copy(challengePayload, off);                 off += cached.authorization.length;
-        challengePayload.writeUInt16BE(cached.ownerPubKeyRaw.length, off); off += 2;
-        cached.ownerPubKeyRaw.copy(challengePayload, off);                off += cached.ownerPubKeyRaw.length;
-        challengePayload.writeUInt16BE(cachePubKey.length, off);           off += 2;
-        cachePubKey.copy(challengePayload, off);                           off += cachePubKey.length;
-        cacheGprime.copy(challengePayload, off);
-
-        this._send(conn, MessageType.CACHE_CHALLENGE, cid, challengePayload);
-        ledger.bytesSent += challengePayload.length;
-
       } else if (this.store.has(cid) && this._shouldServe(ledger)) {
         // Standard request — respond with HAVE
         this._send(conn, MessageType.HAVE, cid);
@@ -616,8 +433,6 @@ export class BitswapEngine extends EventEmitter {
     }
 
     // ── Privacy Step 3: owner receives PRIVACY_RESPONSE ───────────────────────
-    // Decoys arrive on the dedicated DECOY_REQUEST type (see handler below),
-    // so this handler only processes real privacy requests.
     if (type === MessageType.PRIVACY_RESPONSE) {
       if (!this._owned.has(cid)) return;
       const owned = this._owned.get(cid);
@@ -682,142 +497,6 @@ export class BitswapEngine extends EventEmitter {
       return;
     }
 
-    // ── Decoy Step 3: provider receives DECOY_REQUEST (paper Fig. 3) ──────────
-    // Dedicated wire type: the provider does not need to attempt CID² recovery
-    // or do a full privacy-response decode. Payload is
-    // ECIES(DECOY_FLAG(16) ‖ sizeHint(4), R_pub); we verify the flag as a
-    // sanity check (defence in depth against type spoofing), then reply with
-    // AES-GCM-wrapped random bits of the requested size.
-    if (type === MessageType.DECOY_REQUEST) {
-      try {
-        const decrypted = eciesDecrypt(payload, this.localPeer.privateKey);
-        // Expect exactly DECOY_FLAG(16) ‖ sizeHint(4)
-        if (decrypted.length < DECOY_FLAG.length + 4 ||
-            !timingSafeEqual(decrypted.slice(0, DECOY_FLAG.length), DECOY_FLAG)) {
-          // Malformed / spoofed — silently drop (do not signal a real DONT_HAVE
-          // so an attacker cannot use us as a decoy oracle).
-          return;
-        }
-        const AES_GCM_OVERHEAD = 12 + 16;
-        const MAX_DECOY_SIZE = 1024 * 1024 - AES_GCM_OVERHEAD;
-        const rawHint = decrypted.readUInt32BE(DECOY_FLAG.length);
-        const sizeHint = Math.min(rawHint, MAX_DECOY_SIZE);
-        const randomPlaintext = randomBytes(sizeHint);
-        const ephemeralKey = randomBytes(32);
-        const encryptedDecoy = aesEncrypt(randomPlaintext, ephemeralKey);
-        // Ephemeral key discarded — A never decrypts; the AES-GCM envelope
-        // exists purely to match the wire profile of a real PRIVACY_BLOCK.
-        this._send(conn, MessageType.DECOY_BLOCK, cid, encryptedDecoy);
-        ledger.bytesSent += encryptedDecoy.length;
-      } catch {
-        // Decryption failure → not a valid decoy → silently drop.
-      }
-      return;
-    }
-
-    // ── Cache population Step 3: owner receives CACHE_REQUEST ─────────────────
-    if (type === MessageType.CACHE_REQUEST) {
-      // Two cases: (a) owner B receives from cache node C, (b) cache C receives from requester A
-
-      // Case (a): owner side — cid is in _owned
-      if (this._owned.has(cid)) {
-        const owned = this._owned.get(cid);
-        try {
-          // Decrypt payload: ecies(pkLen(2) ‖ PKC ‖ Gc' ‖ K, B_pubkey)
-          const decrypted = eciesDecrypt(payload, this.localPeer.privateKey);
-
-          // Parse: [ pkLen(2) | PKC | Gc'(65) | K(32) ]
-          if (decrypted.length < 2) {
-            this._send(conn, MessageType.DONT_HAVE, cid);
-            return;
-          }
-          const pkLen = decrypted.readUInt16BE(0);
-          const DH_LEN = 65; // uncompressed P-256 point
-          const K_LEN  = 32;
-          if (decrypted.length < 2 + pkLen + DH_LEN + K_LEN) {
-            this._send(conn, MessageType.DONT_HAVE, cid);
-            return;
-          }
-          let off = 2;
-          const cPubKeyRaw = decrypted.slice(off, off + pkLen); off += pkLen;
-          const Gc_prime   = decrypted.slice(off, off + DH_LEN); off += DH_LEN;
-          const K          = decrypted.slice(off, off + K_LEN);
-
-          // SECURITY: bind the payload's PKC to the authenticated peer identity
-          // so a MITM cannot swap in a different cache node's key.
-          const expectedKey = conn.remotePeer.publicKeyRaw;
-          if (cPubKeyRaw.length !== expectedKey.length ||
-              !timingSafeEqual(cPubKeyRaw, expectedKey)) {
-            this._send(conn, MessageType.DONT_HAVE, cid);
-            return;
-          }
-
-          // Fetch raw data from block store
-          const rawData = this.store.get(owned.cid1.string);
-          if (!rawData) {
-            this._send(conn, MessageType.DONT_HAVE, cid);
-            return;
-          }
-
-          // Inner encryption: AES(OBJ, H(CID¹)) — using cid1.digest as the key
-          const innerCipher = aesEncrypt(rawData, owned.cid1.digest);
-
-          // Append 8-byte timestamp
-          const tsBuf = Buffer.alloc(8);
-          tsBuf.writeBigUInt64BE(BigInt(Date.now()));
-          const blob = Buffer.concat([innerCipher, tsBuf]);
-
-          // Outer encryption: AES_K(blob)
-          const outerCipher = aesEncrypt(blob, K);
-
-          // Sign authorization: sign(CID².digest || PKC || Gc')
-          // Per paper §III (line 139): "a signature of CID² concatenated with
-          // C's public key and DH parameter."
-          const authData = Buffer.concat([owned.cid2.digest, cPubKeyRaw, Gc_prime]);
-          const authorization = sign(authData, this.localPeer.privateKey);
-
-          // Build CACHE_RESPONSE: [ outerLen(4) | outer_cipher | auth_len(2) | auth | ownerPubKeyLen(2) | ownerPubKey ]
-          const ownerPubKey = this.localPeer.publicKeyRaw;
-          const response = Buffer.alloc(
-            4 + outerCipher.length + 2 + authorization.length + 2 + ownerPubKey.length
-          );
-          let rOff = 0;
-          response.writeUInt32BE(outerCipher.length, rOff);               rOff += 4;
-          outerCipher.copy(response, rOff);                               rOff += outerCipher.length;
-          response.writeUInt16BE(authorization.length, rOff);             rOff += 2;
-          authorization.copy(response, rOff);                             rOff += authorization.length;
-          response.writeUInt16BE(ownerPubKey.length, rOff);               rOff += 2;
-          ownerPubKey.copy(response, rOff);
-
-          this._send(conn, MessageType.CACHE_RESPONSE, cid, response);
-          ledger.bytesSent += response.length;
-
-        } catch (err) {
-          this._send(conn, MessageType.DONT_HAVE, cid);
-        }
-        return;
-      }
-
-      // Case (b): cache node C receives from requester A (cache retrieval Step 7)
-      if (this._cached.has(cid)) {
-        const cached = this._cached.get(cid);
-        try {
-          // Decrypt payload: ecies(K, C_pubkey) — just the AES key
-          const K = eciesDecrypt(payload, this.localPeer.privateKey);
-
-          // Outer-encrypt the cached blob with requester's K
-          const outerCipher = aesEncrypt(cached.encryptedBlob, K);
-          this._send(conn, MessageType.CACHE_BLOCK, cid, outerCipher);
-          ledger.bytesSent += outerCipher.length;
-
-        } catch (err) {
-          this._send(conn, MessageType.DONT_HAVE, cid);
-        }
-        return;
-      }
-      return;
-    }
-
     // ── Requesting side (we receive a response) ───────────────────────────────
 
     if (type === MessageType.HAVE) {
@@ -832,16 +511,13 @@ export class BitswapEngine extends EventEmitter {
 
     if (type === MessageType.DONT_HAVE) {
       const errMsg = `Peer does not have block: ${cid.slice(0, 20)}...`;
-      // Check standard pending, then cache-related pending entries
-      for (const key of [cid, cid + ':cache', cid + ':fromcache']) {
-        const pending = this._pending.get(key);
-        if (!pending) continue;
-        // SECURITY: only accept DONT_HAVE from the peer we sent the request to
-        if (pending.peerId && pending.peerId !== conn.remotePeer.id) continue;
-        clearTimeout(pending.timeout);
-        this._pending.delete(key);
-        pending.reject(new Error(errMsg));
-      }
+      const pending = this._pending.get(cid);
+      if (!pending) return;
+      // SECURITY: only accept DONT_HAVE from the peer we sent the request to
+      if (pending.peerId && pending.peerId !== conn.remotePeer.id) return;
+      clearTimeout(pending.timeout);
+      this._pending.delete(cid);
+      pending.reject(new Error(errMsg));
       return;
     }
 
@@ -861,158 +537,6 @@ export class BitswapEngine extends EventEmitter {
     if (type === MessageType.PRIVACY_CHALLENGE) {
       // Check for privacy request first
       const pending = this._pending.get(cid);
-
-      // Also check for cache population request (keyed as cid + ':cache')
-      const cachePending = this._pending.get(cid + ':cache');
-
-      if (cachePending?.isCachePopulation) {
-        // Cache population Step 2→3: cache node C received PRIVACY_CHALLENGE from owner B
-        // New format: [ Gb_len(2) | Gb | sig_len(2) | sig | pubKey_len(2) | pubKey ]
-        // C cannot verify the signature (doesn't know CID²), but validates the pubkey.
-
-        // SECURITY: bounds check before parsing
-        if (payload.length < 2 + 65 + 2 + 2) {
-          clearTimeout(cachePending.timeout);
-          this._pending.delete(cid + ':cache');
-          cachePending.reject(new Error('PRIVACY_CHALLENGE: payload too short'));
-          return;
-        }
-        let off       = 0;
-        const GbLen   = payload.readUInt16BE(off); off += 2;
-        off += GbLen; // skip Gb — C doesn't use it for cache protocol
-        if (off + 2 > payload.length) {
-          clearTimeout(cachePending.timeout);
-          this._pending.delete(cid + ':cache');
-          cachePending.reject(new Error('PRIVACY_CHALLENGE: malformed payload'));
-          return;
-        }
-        const sigLen  = payload.readUInt16BE(off); off += 2;
-        if (off + sigLen + 2 > payload.length) {
-          clearTimeout(cachePending.timeout);
-          this._pending.delete(cid + ':cache');
-          cachePending.reject(new Error('PRIVACY_CHALLENGE: malformed payload'));
-          return;
-        }
-        // skip sig — C cannot verify it (doesn't know CID²)
-        off += sigLen;
-        const pkLen   = payload.readUInt16BE(off); off += 2;
-        if (off + pkLen > payload.length) {
-          clearTimeout(cachePending.timeout);
-          this._pending.delete(cid + ':cache');
-          cachePending.reject(new Error('PRIVACY_CHALLENGE: malformed payload'));
-          return;
-        }
-        const pubKeyRaw = payload.slice(off, off + pkLen);
-
-        // SECURITY: verify pubkey matches the authenticated connection key
-        const expectedKey = conn.remotePeer.publicKeyRaw;
-        if (pubKeyRaw.length !== expectedKey.length ||
-            !timingSafeEqual(pubKeyRaw, expectedKey)) {
-          clearTimeout(cachePending.timeout);
-          this._pending.delete(cid + ':cache');
-          cachePending.reject(new Error('PRIVACY_CHALLENGE: public key mismatch — possible MITM'));
-          return;
-        }
-
-        // Step 3: send CACHE_REQUEST with ecies(K ‖ PKC ‖ Gc', B_pubkey)
-        // Per paper §III (line 139): C "responds with the previously exchanged
-        // parameters, extended with an additional Diffie–Hellman public value
-        // G^{c'} and the public key PKC. The message is encrypted using B's
-        // public key." The authorization signature will then bind CID² to
-        // BOTH C's identity AND its ephemeral DH parameter, preventing
-        // signature reuse across different cache sessions.
-        const K = randomBytes(32);  // fresh AES session key
-        const { privateKey: gc_prime, publicKey: Gc_prime } = generateDHKeyPair();
-        cachePending._cacheK = K;             // stash for when CACHE_RESPONSE arrives
-        cachePending._cacheGprime = Gc_prime; // needed later so C can serve CACHE_CHALLENGE
-        const cachePubKey = this.localPeer.publicKeyRaw;
-        // Fixed-length encoded so B can parse unambiguously.
-        // Layout: [ pkLen(2) | PKC | Gc_prime(65) | K(32) ]
-        const cachePayload = Buffer.concat([
-          Buffer.from([cachePubKey.length >> 8, cachePubKey.length & 0xff]),
-          cachePubKey,
-          Gc_prime,
-          K,
-        ]);
-        const encrypted = eciesEncrypt(cachePayload, conn.remotePeer.publicKey);
-
-        this._send(conn, MessageType.CACHE_REQUEST, cid, encrypted);
-        ledger.bytesSent += encrypted.length;
-        // gc_prime discarded — only Gc_prime (public) needs to be retained.
-        void gc_prime;
-        return;
-      }
-
-      // Check for decoy request (keyed as cid + ':decoy')
-      const decoyPending = this._pending.get(cid + ':decoy');
-
-      if (decoyPending?.isDecoy) {
-        // Decoy Step 2→3 (paper Fig. 3): received PRIVACY_CHALLENGE from R.
-        // Send DECOY_REQUEST containing ecies(DECOY_FLAG + sizeHint, R_pubkey).
-        // A dedicated wire type is used so the honest provider can dispatch
-        // decoy handling from the message type alone; wire-level
-        // indistinguishability from real traffic is preserved by matching
-        // the ECIES-envelope size profile.
-
-        // Extract R's public key from the DH challenge format:
-        // [ Gb_len(2) | Gb | sig_len(2) | sig | pubKey_len(2) | pubKey ]
-
-        // SECURITY: bounds check before parsing
-        if (payload.length < 2 + 65 + 2 + 2) {
-          clearTimeout(decoyPending.timeout);
-          this._pending.delete(cid + ':decoy');
-          decoyPending.reject(new Error('PRIVACY_CHALLENGE: payload too short'));
-          return;
-        }
-        let off       = 0;
-        const GbLen   = payload.readUInt16BE(off); off += 2;
-        off += GbLen; // skip Gb (decoy doesn't use it)
-        if (off + 2 > payload.length) {
-          clearTimeout(decoyPending.timeout);
-          this._pending.delete(cid + ':decoy');
-          decoyPending.reject(new Error('PRIVACY_CHALLENGE: malformed payload'));
-          return;
-        }
-        const sigLen  = payload.readUInt16BE(off); off += 2;
-        if (off + sigLen + 2 > payload.length) {
-          clearTimeout(decoyPending.timeout);
-          this._pending.delete(cid + ':decoy');
-          decoyPending.reject(new Error('PRIVACY_CHALLENGE: malformed payload'));
-          return;
-        }
-        off += sigLen;  // skip signature (decoy doesn't verify it)
-        const pkLen   = payload.readUInt16BE(off); off += 2;
-        if (off + pkLen > payload.length) {
-          clearTimeout(decoyPending.timeout);
-          this._pending.delete(cid + ':decoy');
-          decoyPending.reject(new Error('PRIVACY_CHALLENGE: malformed payload'));
-          return;
-        }
-        const pubKeyRaw = payload.slice(off, off + pkLen);
-
-        // SECURITY: verify pubkey matches the authenticated connection
-        const expectedKey = conn.remotePeer.publicKeyRaw;
-        if (pubKeyRaw.length !== expectedKey.length ||
-            !timingSafeEqual(pubKeyRaw, expectedKey)) {
-          clearTimeout(decoyPending.timeout);
-          this._pending.delete(cid + ':decoy');
-          decoyPending.reject(new Error('PRIVACY_CHALLENGE: public key mismatch — possible MITM'));
-          return;
-        }
-
-        // Build decoy payload: DECOY_FLAG(16) + sizeHint(4)
-        // The flag is retained inside the ECIES envelope as a defence in depth
-        // — even if the message type were spoofed, the provider still validates
-        // via decryption before honouring the request.
-        const sizeHint = Buffer.alloc(4);
-        sizeHint.writeUInt32BE(256 + Math.floor(Math.random() * 1024), 0);
-        const decoyPayload = Buffer.concat([DECOY_FLAG, sizeHint]);
-        const encryptedDecoy = eciesEncrypt(decoyPayload, conn.remotePeer.publicKey);
-
-        this._send(conn, MessageType.DECOY_REQUEST, cid, encryptedDecoy);
-        ledger.bytesSent += encryptedDecoy.length;
-        return;
-      }
 
       if (!pending?.isPrivate) return;
 
@@ -1094,8 +618,6 @@ export class BitswapEngine extends EventEmitter {
     }
 
     // ── Privacy Step 4: requester receives PRIVACY_BLOCK ─────────────────────
-    // Real privacy responses only — decoys arrive on DECOY_BLOCK (see handler
-    // below), so no decoy check is required here.
     if (type === MessageType.PRIVACY_BLOCK) {
       const pending = this._pending.get(cid);
       if (!pending?.isPrivate) return;
@@ -1123,181 +645,6 @@ export class BitswapEngine extends EventEmitter {
       return;
     }
 
-    // ── Decoy Step 4: requester receives DECOY_BLOCK (paper Fig. 3) ───────────
-    // The payload is an AES-GCM envelope over random bits keyed with an
-    // ephemeral key we never share with. We do not attempt to decrypt —
-    // arrival alone completes the decoy exchange and matches the paper's
-    // "no verification, no side effect" decoy semantics.
-    if (type === MessageType.DECOY_BLOCK) {
-      const decoyKey = cid + ':decoy';
-      const decoyPending = this._pending.get(decoyKey);
-      if (!decoyPending?.isDecoy) return;
-      clearTimeout(decoyPending.timeout);
-      this._pending.delete(decoyKey);
-      ledger.bytesReceived += payload.length;
-      decoyPending.resolve();
-      return;
-    }
-
-    // ── Cache population Step 4: cache node C receives CACHE_RESPONSE ─────────
-    if (type === MessageType.CACHE_RESPONSE) {
-      const key = cid + ':cache';
-      const pending = this._pending.get(key);
-      if (!pending?.isCachePopulation) return;
-
-      try {
-        // Parse: [ outerLen(4) | outerCipher | auth_len(2) | auth | ownerPubKeyLen(2) | ownerPubKey ]
-        let off = 0;
-        const outerLen = payload.readUInt32BE(off); off += 4;
-        const outerCipher = payload.slice(off, off + outerLen); off += outerLen;
-        const authLen = payload.readUInt16BE(off); off += 2;
-        const authorization = payload.slice(off, off + authLen); off += authLen;
-        const ownerPubKeyLen = payload.readUInt16BE(off); off += 2;
-        const ownerPubKeyRaw = payload.slice(off, off + ownerPubKeyLen);
-
-        // Decrypt outer layer with our session key K
-        const blob = aesDecrypt(outerCipher, pending._cacheK);
-
-        // blob = innerCipher || timestamp(8)
-        // Store entire blob — we cannot decrypt the inner layer (keyed with H(CID¹)).
-        // The timestamp is extracted for informational purposes only.
-        const tsBuf = blob.slice(blob.length - 8);
-        const timestamp = Number(tsBuf.readBigUInt64BE());
-
-        // Store in _cached — keep full blob intact for re-serving
-        this._cached.set(cid, {
-          encryptedBlob: blob,     // innerCipher || timestamp — we cannot decrypt the inner part
-          authorization,         // sign(CID².digest || our_pubkey || Gc')
-          ownerPubKeyRaw,        // B's public key (SPKI DER)
-          cacheGprime: pending._cacheGprime,  // Gc' bound in the authorization signature
-          timestamp,
-        });
-
-        clearTimeout(pending.timeout);
-        this._pending.delete(key);
-        ledger.bytesReceived += payload.length;
-        pending.resolve();
-
-      } catch (err) {
-        clearTimeout(pending.timeout);
-        this._pending.delete(key);
-        pending.reject(new Error(`CACHE_RESPONSE processing failed: ${err.message}`));
-      }
-      return;
-    }
-
-    // ── Cache retrieval Step 6: requester A receives CACHE_CHALLENGE ──────────
-    if (type === MessageType.CACHE_CHALLENGE) {
-      const key = cid + ':fromcache';
-      const pending = this._pending.get(key);
-      if (!pending?.isCacheRetrieval) return;
-
-      try {
-        // Unpack: [ auth_len(2) | auth | ownerPubKeyLen(2) | ownerPubKey | cachePubKeyLen(2) | cachePubKey | Gc'(65) ]
-        const DH_LEN = 65;
-        if (payload.length < 2) {
-          throw new Error('CACHE_CHALLENGE: payload too short');
-        }
-        let off = 0;
-        const authLen = payload.readUInt16BE(off); off += 2;
-        if (off + authLen + 2 > payload.length) {
-          throw new Error('CACHE_CHALLENGE: malformed payload (auth)');
-        }
-        const authorization = payload.slice(off, off + authLen); off += authLen;
-        const ownerPubKeyLen = payload.readUInt16BE(off); off += 2;
-        if (off + ownerPubKeyLen + 2 > payload.length) {
-          throw new Error('CACHE_CHALLENGE: malformed payload (owner pk)');
-        }
-        const ownerPubKeyRaw = payload.slice(off, off + ownerPubKeyLen); off += ownerPubKeyLen;
-        const cachePubKeyLen = payload.readUInt16BE(off); off += 2;
-        if (off + cachePubKeyLen + DH_LEN > payload.length) {
-          throw new Error('CACHE_CHALLENGE: malformed payload (cache pk / Gc)');
-        }
-        const cachePubKeyRaw = payload.slice(off, off + cachePubKeyLen); off += cachePubKeyLen;
-        const cacheGprime    = payload.slice(off, off + DH_LEN);
-
-        // Reconstruct owner's public key from DER bytes
-        const ownerPubKey = createPublicKey({ key: ownerPubKeyRaw, type: 'spki', format: 'der' });
-
-        // SECURITY: verify authorization — owner B signed (CID².digest || PKC || Gc')
-        // Per paper §III (line 139): "signature of CID² concatenated with C's
-        // public key and DH parameter." Binding Gc' prevents an attacker from
-        // reusing the authorization with a substituted DH parameter.
-        // Requester A derives CID² from its known CID¹: CID² = H(H(OBJ)) = H(cid1Digest)
-        const expectedCid2Digest = hash(pending.cid1Digest);
-        const authData = Buffer.concat([expectedCid2Digest, cachePubKeyRaw, cacheGprime]);
-        if (!verify(authData, authorization, ownerPubKey)) {
-          clearTimeout(pending.timeout);
-          this._pending.delete(key);
-          pending.reject(new Error('CACHE_CHALLENGE: authorization signature verification failed'));
-          return;
-        }
-
-        // SECURITY: verify cache node's public key matches authenticated connection
-        const expectedCacheKey = conn.remotePeer.publicKeyRaw;
-        if (cachePubKeyRaw.length !== expectedCacheKey.length ||
-            !timingSafeEqual(cachePubKeyRaw, expectedCacheKey)) {
-          clearTimeout(pending.timeout);
-          this._pending.delete(key);
-          pending.reject(new Error('CACHE_CHALLENGE: cache node public key mismatch — possible MITM'));
-          return;
-        }
-
-        // Step 7: send ecies(K, C_pubkey)
-        const encrypted = eciesEncrypt(pending.K, conn.remotePeer.publicKey);
-        this._send(conn, MessageType.CACHE_REQUEST, cid, encrypted);
-        ledger.bytesSent += encrypted.length;
-
-      } catch (err) {
-        clearTimeout(pending.timeout);
-        this._pending.delete(key);
-        pending.reject(new Error(`CACHE_CHALLENGE processing failed: ${err.message}`));
-      }
-      return;
-    }
-
-    // ── Cache retrieval Step 8: requester A receives CACHE_BLOCK ──────────────
-    if (type === MessageType.CACHE_BLOCK) {
-      const key = cid + ':fromcache';
-      const pending = this._pending.get(key);
-      if (!pending?.isCacheRetrieval) return;
-      clearTimeout(pending.timeout);
-      this._pending.delete(key);
-      ledger.bytesReceived += payload.length;
-
-      try {
-        // Decrypt outer layer with our session key K
-        const blob = aesDecrypt(payload, pending.K);
-
-        // blob = innerCipher || timestamp(8)
-        // innerCipher = AES(OBJ, H(CID¹))
-        const innerCipher = blob.slice(0, blob.length - 8);
-        const tsBuf = blob.slice(blob.length - 8);
-        const timestamp = Number(tsBuf.readBigUInt64BE());
-
-        // Verify the cached object has not expired
-        if (Date.now() - timestamp > CACHE_TTL_MS) {
-          pending.reject(new Error('CACHE_BLOCK: cached object has expired'));
-          return;
-        }
-
-        // Decrypt inner layer with H(CID¹) = cid1Digest (32 bytes, used as AES key)
-        const decrypted = aesDecrypt(innerCipher, pending.cid1Digest);
-
-        // Verify integrity: H(decrypted) should equal cid1Digest
-        const actualHash = hash(decrypted);
-        if (actualHash.length !== pending.cid1Digest.length ||
-            !timingSafeEqual(actualHash, pending.cid1Digest)) {
-          pending.reject(new Error('CACHE_BLOCK: content hash does not match CID¹'));
-          return;
-        }
-
-        pending.resolve(decrypted);
-      } catch (err) {
-        pending.reject(new Error(`CACHE_BLOCK decrypt failed: ${err.message}`));
-      }
-      return;
-    }
   }
 
   // ── Ledger / incentive ────────────────────────────────────────────────────
@@ -1403,9 +750,9 @@ export class BitswapEngine extends EventEmitter {
    * _forwardUpstream(cid, type, payload, senderConn) → boolean
    *
    * If this node has a forward entry for cid, forward the message to the
-   * origin (upstream). On the first HAVE / PRIVACY_CHALLENGE / CACHE_CHALLENGE
-   * we also lock in the "holder" (so subsequent client→holder messages know
-   * where to go). Returns true iff forwarding happened.
+   * origin (upstream). On the first HAVE / PRIVACY_CHALLENGE we also lock in
+   * the "holder" (so subsequent client→holder messages know where to go).
+   * Returns true iff forwarding happened.
    *
    * DONT_HAVE forwarded downstream is aggregated: we only forward upstream
    * DONT_HAVE once ALL peers we broadcast to reply DONT_HAVE.
@@ -1434,12 +781,8 @@ export class BitswapEngine extends EventEmitter {
     const isPositiveReply =
       type === MessageType.HAVE ||
       type === MessageType.PRIVACY_CHALLENGE ||
-      type === MessageType.CACHE_CHALLENGE ||
       type === MessageType.BLOCK ||
-      type === MessageType.PRIVACY_BLOCK ||
-      type === MessageType.CACHE_BLOCK ||
-      type === MessageType.CACHE_RESPONSE ||
-      type === MessageType.DECOY_BLOCK;
+      type === MessageType.PRIVACY_BLOCK;
 
     if (isPositiveReply && !entry.holder) {
       entry.holder = senderConn;
@@ -1461,9 +804,7 @@ export class BitswapEngine extends EventEmitter {
     // Terminal messages: the transaction is done, drop the forward entry.
     const isTerminal =
       type === MessageType.BLOCK ||
-      type === MessageType.PRIVACY_BLOCK ||
-      type === MessageType.CACHE_BLOCK ||
-      type === MessageType.DECOY_BLOCK;
+      type === MessageType.PRIVACY_BLOCK;
     if (isTerminal) this._forwardTable.delete(cid);
 
     return true;
@@ -1474,7 +815,7 @@ export class BitswapEngine extends EventEmitter {
    *
    * Client → holder direction. If we forwarded a WANT_HAVE for this cid and
    * senderConn is the original origin, forward the client-side follow-up
-   * (WANT_BLOCK / PRIVACY_RESPONSE / CACHE_REQUEST / DECOY_REQUEST) to holder.
+   * (WANT_BLOCK / PRIVACY_RESPONSE) to holder.
    * Returns true iff forwarding happened.
    */
   _forwardDownstream(cid, type, payload, senderConn) {
@@ -1500,13 +841,5 @@ export class BitswapEngine extends EventEmitter {
    */
   ledgerFor(peerId) {
     return this.ledgers.get(peerId) || new Ledger(peerId);
-  }
-
-  /**
-   * hasCached(cid3String) → boolean
-   * @param {string} cid3String
-   */
-  hasCached(cid3String) {
-    return this._cached.has(cid3String);
   }
 }

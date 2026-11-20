@@ -100,9 +100,6 @@ async function refreshStatus() {
   if (s.peerId)      document.getElementById('card-peer-id').textContent    = s.peerId;
   if (s.peerCount !== undefined) document.getElementById('card-peer-count').textContent = s.peerCount;
   if (s.blockCount !== undefined) document.getElementById('card-blocks').textContent    = s.blockCount;
-  // Update cached items count
-  const items = await window.ipfs.getCachedItems();
-  document.getElementById('card-cached').textContent = items.length;
 
   // Storage & DHT cards
   const storage = await window.ipfs.getStorageStats();
@@ -115,8 +112,6 @@ async function refreshStatus() {
   const dot = document.getElementById('privacy-dot');
   dot.className = `privacy-dot ${privacy.score}`;
   document.getElementById('privacy-score-text').textContent = privacy.score.charAt(0).toUpperCase() + privacy.score.slice(1);
-  document.getElementById('privacy-decoys').textContent = privacy.decoysEnabled ? 'Enabled' : 'Disabled';
-  document.getElementById('privacy-registry').textContent = `${privacy.registrySize} CID\u00b3s`;
   document.getElementById('privacy-peers').textContent = privacy.connectedPeers;
 
   // Topology (only if Dashboard is active)
@@ -262,7 +257,8 @@ btnGet.addEventListener('click', async () => {
 
   log('info', `Retrieving CID\u00b9: ${cid1}`);
 
-  const res = await window.ipfs.getFile(cid1);
+  const kHex = document.getElementById('input-hmac-k').value.trim();
+  const res = await window.ipfs.getFile(cid1, kHex);
   btnGet.disabled = false;
 
   if (res && res.ok) {
@@ -459,66 +455,19 @@ async function refreshCachePeerDropdown() {
 }
 
 btnCache.addEventListener('click', async () => {
-  cacheError.textContent = '';
+  cacheError.textContent = 'Encrypted caching has been removed from this build.';
   cacheResult.classList.add('hidden');
-
-  if (!nodeRunning) { cacheError.textContent = 'Start the node first.'; return; }
-
-  const cid3 = cacheCid3Input.value.trim();
-  if (!cid3) { cacheError.textContent = 'Enter a CID\u00b3.'; return; }
-  if (!cid3.startsWith('b')) { cacheError.textContent = 'CID\u00b3 must start with "b" (base32).'; return; }
-
-  const peerId = cachePeerSelect.value;
-  if (!peerId) { cacheError.textContent = 'Select a connected peer.'; return; }
-
-  btnCache.disabled = true;
-  log('info', `Caching CID\u00b3 from peer ${peerId.slice(0, 12)}\u2026`);
-
-  const res = await window.ipfs.cacheFromPeer(cid3, peerId);
-  btnCache.disabled = false;
-
-  if (res && res.ok) {
-    cacheResult.classList.remove('hidden');
-    log('ok', `Cached CID\u00b3: ${cid3.slice(0, 24)}\u2026`);
-    showToast('Cached successfully', 'success');
-    refreshCacheTable();
-  } else {
-    cacheError.textContent = `Cache failed: ${res?.error || 'unknown'}`;
-    log('error', `Cache failed: ${res?.error || 'unknown'}`);
-  }
 });
 
 // Cached items table
 async function refreshCacheTable() {
   const tbody = document.getElementById('cache-tbody');
-  tbody.innerHTML = '';
-
-  if (!nodeRunning) {
-    tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center">Node not running</td></tr>';
-    return;
-  }
-
-  const items = await window.ipfs.getCachedItems();
-  document.getElementById('card-cached').textContent = items.length;
-
-  if (items.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center">No cached items</td></tr>';
-    return;
-  }
-
-  for (const item of items) {
-    const tr = document.createElement('tr');
-    const ts = item.timestamp ? new Date(item.timestamp).toLocaleString() : '\u2014';
-    tr.innerHTML = `<td class="mono" style="max-width:300px;overflow:hidden;text-overflow:ellipsis">${item.cid3}</td><td>${ts}</td><td><button class="btn-remove-cache" data-cid3="${item.cid3}">Remove</button></td>`;
-    tbody.appendChild(tr);
-  }
+  tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center">Encrypted caching has been removed</td></tr>';
 }
 
 // Remove cached item (event delegation)
 document.getElementById('cache-table').addEventListener('click', async (e) => {
   if (!e.target.classList.contains('btn-remove-cache')) return;
-  const cid3 = e.target.dataset.cid3;
-  await window.ipfs.removeCached(cid3);
   refreshCacheTable();
 });
 
@@ -571,7 +520,7 @@ document.getElementById('btn-clear-log').addEventListener('click', () => {
 });
 
 // ── Decoy toggle ────────────────────────────────────────────────────────────
-const decoyToggle = document.getElementById('setting-decoys');
+const decoyToggle = null;
 if (decoyToggle) {
   decoyToggle.addEventListener('change', () => {
     window.ipfs.setDecoysEnabled(decoyToggle.checked);
@@ -580,7 +529,7 @@ if (decoyToggle) {
 }
 
 // ── Manual decoy button ─────────────────────────────────────────────────────
-const btnSendDecoy = document.getElementById('btn-send-decoy');
+const btnSendDecoy = null;
 if (btnSendDecoy) {
   btnSendDecoy.addEventListener('click', async () => {
     if (!nodeRunning) { log('warn', 'Start the node first.'); return; }
@@ -660,17 +609,7 @@ async function refreshDHT() {
   }
 
   const regTbody = document.getElementById('dht-registry-tbody');
-  regTbody.innerHTML = '';
-  if (registry.length === 0) {
-    regTbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center">No CID\u00b3 entries in registry</td></tr>';
-  } else {
-    for (const r of registry) {
-      const tr = document.createElement('tr');
-      const selfBadge = r.selfOwned ? '<span class="badge badge-self">SELF</span>' : '';
-      tr.innerHTML = `<td class="mono" style="max-width:280px;overflow:hidden;text-overflow:ellipsis">${r.cid3}</td><td>${r.peers.length} ${selfBadge}</td><td>${r.selfOwned ? 'Yes' : 'No'}</td>`;
-      regTbody.appendChild(tr);
-    }
-  }
+  if (regTbody) regTbody.innerHTML = '';
 }
 
 function formatAgo(ts) {

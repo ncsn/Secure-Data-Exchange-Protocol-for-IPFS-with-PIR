@@ -1,9 +1,10 @@
 # 13-node chain topology (BITSWAP_FLOOD_FORWARD=1):
 #
-#   bench(host) ──► peer1 ──► peer2 ──► ... ──► peer10 ──► {owner, cache}
+#   bench(host) ──► peer1 ──► peer2 ──► ... ──► peer10 ──► owner
+#                                                peer11 ──► owner
 #
-# Every peer connects ONLY to its next chain hop. peer10 fans out to both
-# owner and cache so cache-role operations reach the cache node.
+# Every peer connects ONLY to its next chain hop. peer10 connects to the owner.
+# peer11 (formerly the cache role) is now a plain DHT peer on the owner.
 
 services:
   owner:
@@ -14,20 +15,21 @@ services:
       - ROLE=owner
       - PORT=4001
       - ANNOUNCE_IP=owner
+      - BENCH_HMAC_KEY=bench-hmac-key-32-bytes-padding!!
       - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4001:4001"
     volumes:
       - shared13:/shared
 
-  cache:
+  peer11:
     build:
       context: ..
       dockerfile: docker/Dockerfile
     environment:
-      - ROLE=cache
+      - ROLE=peer
       - PORT=4002
-      - ANNOUNCE_IP=cache
+      - ANNOUNCE_IP=peer11
       - OWNER_HOST=owner
       - OWNER_PORT=4001
       - BITSWAP_FLOOD_FORWARD=1
@@ -46,15 +48,15 @@ services:
       - ROLE=requester
       - PORT=4003
       - ANNOUNCE_IP=requester
-      - CACHE_HOST=cache
-      - CACHE_PORT=4002
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
       - BITSWAP_FLOOD_FORWARD=1
     ports:
       - "4003:4003"
     volumes:
       - shared13:/shared
     depends_on:
-      - cache
+      - owner
 
   peer10:
     build: { context: .., dockerfile: docker/Dockerfile }
@@ -64,12 +66,10 @@ services:
       - ANNOUNCE_IP=peer10
       - OWNER_HOST=owner
       - OWNER_PORT=4001
-      - CACHE_HOST=cache
-      - CACHE_PORT=4002
       - BITSWAP_FLOOD_FORWARD=1
     ports: [ "4020:4020" ]
     volumes: [ shared13:/shared ]
-    depends_on: [ owner, cache ]
+    depends_on: [ owner ]
 
   peer9:
     build: { context: .., dockerfile: docker/Dockerfile }

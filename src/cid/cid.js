@@ -10,9 +10,14 @@
  * This module extends standard CID generation to produce the three CIDs
  * required by the triple-hash privacy protocol:
  *
- *   CID¹  =  CID of  H(OBJ)          — standard CID, published to DHT
- *   CID²  =  CID of  H(H(OBJ))       — kept SECRET by the owner
- *   CID³  =  CID of  H(H(H(OBJ)))    — published to DHT alongside CID¹
+ *   CID¹  =  CID of  H(OBJ)           — standard CID, published to DHT
+ *   CID²  =  CID of  H(H(OBJ))        — kept SECRET by the owner
+ *   CID³  =  CID of  HMAC_k(CID²)     — published to DHT alongside CID¹
+ *
+ * CID³ uses HMAC_k instead of a plain hash so that an adversary who
+ * observes CID¹ and CID³ cannot reconstruct CID² via a dictionary attack.
+ * The key k is a symmetric secret shared out-of-band alongside CID³ (e.g. via
+ * the DHT record), since k is required to compute CID³ before any handshake begins.
  *
  * ── CID binary layout ──────────────────────────────────────────────────────
  *
@@ -39,7 +44,7 @@
  *   Full table: https://github.com/multiformats/multicodec/blob/master/table.csv
  */
 
-import { hash, toMultihash } from './crypto.js';
+import { hash, hmac, toMultihash } from './crypto.js';
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -107,37 +112,41 @@ export class CID {
 // ── Triple-hash factory ───────────────────────────────────────────────────────
 
 /**
- * tripleHash(data) → { cid1, cid2, cid3, h1, h2, h3 }
+ * tripleHash(data, k) → { cid1, cid2, cid3, h1, h2, h3 }
  *
- * Given raw object data, produces the three CIDs required by the
- * triple-hash privacy protocol:
+ * Given raw object data and a symmetric key k, produces the three CIDs
+ * required by the triple-hash privacy protocol:
  *
  *   h1 = H(data)        → CID¹  (published to DHT)
  *   h2 = H(h1)          → CID²  (SECRET — never share this)
- *   h3 = H(h2)          → CID³  (published to DHT)
+ *   h3 = HMAC_k(h2)     → CID³  (published to DHT)
  *
- * The raw digest values (h1, h2, h3) are also returned because:
- *   - h1 is used as the AES encryption key in the caching protocol
+ * CID³ = HMAC_k(CID²) prevents dictionary attacks: without k an adversary
+ * cannot derive CID² from the publicly visible CID¹ and CID³.
+ * The key k is a symmetric secret shared out-of-band alongside CID³ (e.g. via
+ * the DHT record), since k is required to compute CID³ before any handshake begins.
+ *
+ * The raw digest values are also returned because:
  *   - h2 is used as a challenge in the Bitswap authentication handshake
  *
  * @param {Buffer|string} data — raw object content
+ * @param {Buffer|string} k    — symmetric HMAC key (32 bytes recommended)
  * @returns {{ cid1: CID, cid2: CID, cid3: CID, h1: Buffer, h2: Buffer, h3: Buffer }}
  */
-export function tripleHash(data) {
-  // Convert strings to Buffer so hashing is consistent
+export function tripleHash(data, k) {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
 
   const h1 = hash(buf);        // H(OBJ)
   const h2 = hash(h1);         // H(H(OBJ))
-  const h3 = hash(h2);         // H(H(H(OBJ)))
+  const h3 = hmac(k, h2);      // HMAC_k(H(H(OBJ))) — CID³
 
   return {
     cid1: new CID(h1),         // published — standard address of the object
     cid2: new CID(h2),         // SECRET    — proof of ownership
     cid3: new CID(h3),         // published — privacy-preserving lookup key
-    h1,                        // raw digest — used as AES key in caching
+    h1,                        // raw digest
     h2,                        // raw digest — used as challenge in Bitswap auth
-    h3,                        // raw digest — (informational)
+    h3,                        // raw digest
   };
 }
 

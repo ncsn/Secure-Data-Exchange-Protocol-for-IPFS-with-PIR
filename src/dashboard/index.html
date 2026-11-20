@@ -306,8 +306,6 @@
   .log-type.PRIVACY_CHALLENGE { color: var(--purple); }
   .log-type.PRIVACY_RESPONSE  { color: var(--purple); }
   .log-type.PRIVACY_BLOCK     { color: var(--teal); }
-  .log-type.DECOY_REQUEST     { color: var(--orange); }
-  .log-type.DECOY_BLOCK       { color: var(--orange); }
   .log-type.ADD_PROVIDER      { color: var(--green); }
   .log-type.GET_PROVIDERS     { color: #79c0ff; }
   .log-type.GET_PROVIDERS_RESP{ color: #79c0ff; }
@@ -402,13 +400,6 @@
           <span>
             <span class="btn-main">Retrieve from Node C</span>
             <span class="btn-sub">C queries DHT → finds A → 4-step privacy handshake</span>
-          </span>
-        </button>
-        <button class="demo-btn" id="btn-decoy" onclick="runAction('send-decoy')">
-          <span class="step-num step-3">3</span>
-          <span>
-            <span class="btn-main">Send decoy request</span>
-            <span class="btn-sub">Indistinguishable from real retrieval · A replies with random bits</span>
           </span>
         </button>
       </div>
@@ -709,22 +700,12 @@ function handleStep({ step, cid1, cid2, cid3, bytes, match, error }) {
       `;
     }
   }
-
-  if (step === 'send-decoy') {
-    flashNode('C', 'var(--orange)');
-    status.className = 'ok';
-    status.innerHTML = `
-      <strong>Decoy sent.</strong> C sent a <span style="color:var(--orange)">DECOY_REQUEST</span>
-      that is indistinguishable from a real retrieval to any network observer.
-      Node A responded with random bits — no real data was transferred.
-    `;
-  }
 }
 
 // ── Demo button actions ───────────────────────────────────────────────────────
 
 async function runAction(name) {
-  const btnMap = { 'add-to-a': 'btn-add', 'retrieve-from-c': 'btn-get', 'send-decoy': 'btn-decoy' };
+  const btnMap = { 'add-to-a': 'btn-add', 'retrieve-from-c': 'btn-get' };
   const btn    = document.getElementById(btnMap[name]);
   const status = document.getElementById('demo-status');
 

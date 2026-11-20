@@ -42,7 +42,7 @@ import { timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 
 import { Node }        from './node.js';
-import { tripleHash }  from '../cid/cid.js';
+import { hash }        from '../cid/crypto.js';
 
 // ── Arg parser ────────────────────────────────────────────────────────────────
 
@@ -108,7 +108,7 @@ async function cmdAdd(node, args) {
   console.log(c('dim', `  Adding ${filePath}…`));
   const bytes = fs.readFileSync(filePath);
   const { cid1, cid2, cid3 } = await node.addBytes(bytes, { name: path.basename(filePath) });
-  const { h1 } = tripleHash(bytes);
+  const h1     = hash(bytes);
   const h1hex  = h1.toString('hex');
 
   console.log();
@@ -388,7 +388,7 @@ function startNodeApi(node, apiPort, nodeName, announceIp, apiToken = null) {
         const bytes   = Buffer.from(body.content, 'base64');
         const name    = body.name || 'file';
         const { cid1, cid2, cid3 } = await node.addBytes(bytes, { name });
-        const { h1 }  = (await import('../cid/cid.js')).tripleHash(bytes);
+        const h1      = hash(bytes);
         res.end(JSON.stringify({ ok: true, cid1, cid2, cid3, h1hex: h1.toString('hex') }));
       } catch (err) {
         res.end(JSON.stringify({ ok: false, error: err.message }));
@@ -437,7 +437,6 @@ function _bsTypeName(type) {
     0x01:'WANT_HAVE', 0x02:'HAVE', 0x03:'DONT_HAVE', 0x04:'WANT_BLOCK',
     0x05:'BLOCK', 0x06:'CANCEL', 0x10:'PRIVACY_CHALLENGE',
     0x11:'PRIVACY_RESPONSE', 0x12:'PRIVACY_BLOCK',
-    0x20:'DECOY_REQUEST', 0x21:'DECOY_BLOCK',
   };
   return names[type] || `0x${type?.toString(16)}`;
 }

@@ -19,7 +19,7 @@
  *      Full list: https://github.com/multiformats/multicodec/blob/master/table.csv
  */
 
-import { createHash } from 'crypto';
+import { createHash, createHmac } from 'crypto';
 
 // ── Algorithm configuration ───────────────────────────────────────────────────
 
@@ -54,6 +54,21 @@ const MULTIHASH_CODE = 0x12; // SHA2-256
  */
 export function hash(data) {
   return createHash(HASH_ALGORITHM).update(data).digest();
+}
+
+/**
+ * hmac(key, data) → Buffer
+ *
+ * Computes HMAC-SHA-256 of data under key.
+ * Used for CID³ = HMAC_k(CID²) — prevents dictionary attacks against CID³
+ * because the key k is never transmitted in the clear.
+ *
+ * @param {Buffer|string} key  — secret symmetric key (exchanged via ECIES)
+ * @param {Buffer|string} data — input bytes (CID² digest)
+ * @returns {Buffer} 32-byte HMAC digest
+ */
+export function hmac(key, data) {
+  return createHmac('sha256', key).update(data).digest();
 }
 
 // ── Multihash encoding ────────────────────────────────────────────────────────
