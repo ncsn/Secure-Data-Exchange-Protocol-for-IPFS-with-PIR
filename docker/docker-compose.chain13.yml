@@ -1,0 +1,210 @@
+# Chain topology — 13 nodes (owner + 11 relay peers + host requester entry).
+#
+#   host-bench ──► peer11 ──► peer10 ──► … ──► peer1 ──► owner
+#
+# Same mechanism as docker-compose.chain8.yml, extended to 11 relay hops.
+# PLAIN wantBlock relay only (privacy handshake is non-relayable by design).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.chain13.yml up --build
+
+services:
+  peer1:
+    environment:
+      - ROLE=peer
+      - PORT=4002
+      - ANNOUNCE_IP=peer1
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=owner
+      - CHAIN_NEXT_PORT=4001
+
+  peer2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4004
+      - ANNOUNCE_IP=peer2
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer1
+      - CHAIN_NEXT_PORT=4002
+    ports:
+      - "4004:4004"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer1
+
+  peer3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4005
+      - ANNOUNCE_IP=peer3
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer2
+      - CHAIN_NEXT_PORT=4004
+    ports:
+      - "4005:4005"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer2
+
+  peer4:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4006
+      - ANNOUNCE_IP=peer4
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer3
+      - CHAIN_NEXT_PORT=4005
+    ports:
+      - "4006:4006"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer3
+
+  peer5:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4007
+      - ANNOUNCE_IP=peer5
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer4
+      - CHAIN_NEXT_PORT=4006
+    ports:
+      - "4007:4007"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer4
+
+  peer6:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4008
+      - ANNOUNCE_IP=peer6
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer5
+      - CHAIN_NEXT_PORT=4007
+    ports:
+      - "4008:4008"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer5
+
+  peer7:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4009
+      - ANNOUNCE_IP=peer7
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer6
+      - CHAIN_NEXT_PORT=4008
+    ports:
+      - "4009:4009"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer6
+
+  peer8:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4010
+      - ANNOUNCE_IP=peer8
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer7
+      - CHAIN_NEXT_PORT=4009
+    ports:
+      - "4010:4010"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer7
+
+  peer9:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4011
+      - ANNOUNCE_IP=peer9
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer8
+      - CHAIN_NEXT_PORT=4010
+    ports:
+      - "4011:4011"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer8
+
+  peer10:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4012
+      - ANNOUNCE_IP=peer10
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer9
+      - CHAIN_NEXT_PORT=4011
+    ports:
+      - "4012:4012"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer9
+
+  peer11:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4013
+      - ANNOUNCE_IP=peer11
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer10
+      - CHAIN_NEXT_PORT=4012
+    ports:
+      - "4013:4013"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer10
+
+  # Host harness is the entry point; keep the default requester wired to the tail.
+  requester:
+    environment:
+      - ROLE=peer
+      - PORT=4003
+      - ANNOUNCE_IP=requester
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer11
+      - CHAIN_NEXT_PORT=4013
+    depends_on:
+      - peer11

@@ -1,0 +1,96 @@
+# Star scaling — 8 nodes (owner + 6 idle DHT peers + requester).
+# All peers connect directly to the owner (no chain). Measures how DHT
+# provider-lookup / discovery latency grows with network size.
+#   docker compose -f docker-compose.yml -f docker-compose.star8.yml up --build
+
+services:
+  peer2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4004
+      - ANNOUNCE_IP=peer2
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4004:4004"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+
+  peer3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4005
+      - ANNOUNCE_IP=peer3
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4005:4005"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+
+  peer4:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4006
+      - ANNOUNCE_IP=peer4
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4006:4006"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+
+  peer5:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4007
+      - ANNOUNCE_IP=peer5
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4007:4007"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+
+  peer6:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4008
+      - ANNOUNCE_IP=peer6
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4008:4008"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+

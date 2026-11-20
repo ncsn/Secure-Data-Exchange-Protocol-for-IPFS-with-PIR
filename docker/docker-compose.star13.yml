@@ -1,0 +1,186 @@
+# Star scaling — 13 nodes (owner + 11 idle DHT peers + requester).
+# All peers connect directly to the owner (no chain). Measures how DHT
+# provider-lookup / discovery latency grows with network size.
+#   docker compose -f docker-compose.yml -f docker-compose.star13.yml up --build
+
+services:
+  peer2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4004
+      - ANNOUNCE_IP=peer2
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4004:4004"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+
+  peer3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4005
+      - ANNOUNCE_IP=peer3
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4005:4005"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+
+  peer4:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4006
+      - ANNOUNCE_IP=peer4
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4006:4006"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+
+  peer5:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4007
+      - ANNOUNCE_IP=peer5
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4007:4007"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+
+  peer6:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4008
+      - ANNOUNCE_IP=peer6
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4008:4008"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+
+  peer7:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4009
+      - ANNOUNCE_IP=peer7
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4009:4009"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+
+  peer8:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4010
+      - ANNOUNCE_IP=peer8
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4010:4010"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+
+  peer9:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4011
+      - ANNOUNCE_IP=peer9
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4011:4011"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+
+  peer10:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4012
+      - ANNOUNCE_IP=peer10
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4012:4012"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+
+  peer11:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4013
+      - ANNOUNCE_IP=peer11
+      - OWNER_HOST=owner
+      - OWNER_PORT=4001
+      - BITSWAP_FLOOD_FORWARD=1
+    ports:
+      - "4013:4013"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - owner
+

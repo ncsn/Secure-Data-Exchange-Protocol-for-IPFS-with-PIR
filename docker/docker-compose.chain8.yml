@@ -1,0 +1,128 @@
+# Chain topology — 8 nodes (owner + 6 relay peers + requester entry via tail).
+#
+#   host-bench ──► peer6 ──► peer5 ──► … ──► peer1 ──► owner
+#
+# Every peer runs BITSWAP_FLOOD_FORWARD=1 and connects ONLY to its upstream
+# (CHAIN_NEXT_*), so a plain WANT_HAVE entering at the tail (peer6, port 4008)
+# floods hop-by-hop until it reaches the owner. The host harness dials the tail
+# port to measure latency as a function of hop count.
+#
+# NOTE: this chain carries the PLAIN (non-private) wantBlock relay. The 4-step
+# privacy handshake is end-to-end authenticated and cannot be transparently
+# relayed hop-by-hop (the anti-MITM key-binding check rejects it), so the chain
+# measures relay/discovery cost, not the privacy protocol.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.chain8.yml up --build
+
+services:
+  peer1:
+    environment:
+      - ROLE=peer
+      - PORT=4002
+      - ANNOUNCE_IP=peer1
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=owner
+      - CHAIN_NEXT_PORT=4001
+
+  peer2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4004
+      - ANNOUNCE_IP=peer2
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer1
+      - CHAIN_NEXT_PORT=4002
+    ports:
+      - "4004:4004"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer1
+
+  peer3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4005
+      - ANNOUNCE_IP=peer3
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer2
+      - CHAIN_NEXT_PORT=4004
+    ports:
+      - "4005:4005"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer2
+
+  peer4:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4006
+      - ANNOUNCE_IP=peer4
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer3
+      - CHAIN_NEXT_PORT=4005
+    ports:
+      - "4006:4006"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer3
+
+  peer5:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4007
+      - ANNOUNCE_IP=peer5
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer4
+      - CHAIN_NEXT_PORT=4006
+    ports:
+      - "4007:4007"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer4
+
+  peer6:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - ROLE=peer
+      - PORT=4008
+      - ANNOUNCE_IP=peer6
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer5
+      - CHAIN_NEXT_PORT=4007
+    ports:
+      - "4008:4008"
+    volumes:
+      - shared:/shared
+    depends_on:
+      - peer5
+
+  # The default requester is not used in chain mode; the host harness is the
+  # entry point. Keep it connected to the owner so the stack stays valid.
+  requester:
+    environment:
+      - ROLE=peer
+      - PORT=4003
+      - ANNOUNCE_IP=requester
+      - BITSWAP_FLOOD_FORWARD=1
+      - CHAIN_NEXT_HOST=peer6
+      - CHAIN_NEXT_PORT=4008
+    depends_on:
+      - peer6
