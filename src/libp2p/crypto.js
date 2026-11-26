@@ -119,8 +119,11 @@ export function computeDHSecret(myPrivateKey, theirPublicKey) {
  * @returns {{
  *   privateKey    : KeyObject  — Node.js private key object
  *   publicKey     : KeyObject  — Node.js public key object
- *   publicKeyRaw  : Buffer     — 65-byte uncompressed public key (04 || x || y)
+ *   publicKeyRaw  : Buffer     — SPKI DER-encoded public key (~91 bytes for P-256).
  *                               Used for Peer ID derivation and wire encoding.
+ *                               NOTE: this is the full SPKI DER structure, not the
+ *                               bare 65-byte uncompressed point. exportRawPublicKey()
+ *                               extracts the 65-byte point (slice(-65)) for ECDH.
  * }}
  */
 export function generateKeyPair() {
@@ -128,7 +131,8 @@ export function generateKeyPair() {
     namedCurve: CURVE,
   });
 
-  // Export the raw uncompressed public key (04 || x || y) for hashing
+  // Export the SPKI DER public key. Peer IDs and the wire format are both derived
+  // from these exact bytes, so this must stay stable across the codebase.
   const publicKeyRaw = Buffer.from(
     publicKey.export({ type: 'spki', format: 'der' })
   );
@@ -267,39 +271,68 @@ export function eciesDecrypt(ciphertext, privateKey) {
 // Owner B encrypts OBJ with the AES session key K supplied by node A.
 
 /**
- * aesEncrypt(plaintext, key) → Buffer
+ * aesEncrypt(plaintext, key, aad?, nonce?) → Buffer
  *
- * Encrypts with AES-256-GCM using a caller-supplied key.
+ * Encrypts with AES-256-GCM using a caller-supplied key. When `aad` is given,
+ * it is bound as GCM associated data: the auth tag then covers both the
+ * ciphertext and the associated data, but the AAD itself is NOT stored in the
+ * output (the caller must supply the identical AAD to decrypt).
+ *
+ * When `nonce` is given it is used verbatim as the GCM IV (it must be exactly
+ * GCM_IV_BYTES long); otherwise a fresh random IV is generated. Supplying the
+ * nonce lets a caller realize the paper's record form C_j = ν_j ‖ enc_K(ν_j,
+ * pad(O_j); G,j), where ν_j is the actual GCM nonce (not merely associated
+ * data). The IV is always stored in the output, so decrypt needs only the key
+ * (and the matching AAD); it does not need the nonce passed back separately.
  * Output: [ iv(12) | tag(16) | ciphertext ]
+ *
+ * CAUTION: a caller-supplied nonce MUST be unique per key — GCM nonce reuse is
+ * catastrophic. Pass a fresh random ν_j per record (as collection setup does).
  *
  * @param {Buffer} plaintext
  * @param {Buffer} key — 32-byte AES key
+ * @param {Buffer} [aad] — optional associated data bound into the auth tag
+ * @param {Buffer} [nonce] — optional explicit GCM IV (exactly GCM_IV_BYTES)
  * @returns {Buffer}
  */
-export function aesEncrypt(plaintext, key) {
-  const iv      = randomBytes(GCM_IV_BYTES);
+export function aesEncrypt(plaintext, key, aad, nonce) {
+  let iv;
+  if (nonce === undefined) {
+    iv = randomBytes(GCM_IV_BYTES);
+  } else {
+    if (!Buffer.isBuffer(nonce) || nonce.length !== GCM_IV_BYTES) {
+      throw new Error(`aesEncrypt: nonce must be a ${GCM_IV_BYTES}-byte Buffer`);
+    }
+    iv = nonce;
+  }
   const cipher  = createCipheriv(ECIES_CIPHER, key, iv);
+  if (aad) cipher.setAAD(aad);
   const enc     = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const tag     = cipher.getAuthTag();
   return Buffer.concat([iv, tag, enc]);
 }
 
 /**
- * aesDecrypt(ciphertext, key) → Buffer
+ * aesDecrypt(ciphertext, key, aad?) → Buffer
  *
- * Decrypts output from aesEncrypt().
+ * Decrypts output from aesEncrypt(). If the ciphertext was produced with AAD,
+ * the identical `aad` must be supplied here or the GCM tag check fails. The IV
+ * is read from the ciphertext prefix, so an explicit nonce is never needed here
+ * regardless of whether encrypt used a random or caller-supplied IV.
  *
  * @param {Buffer} ciphertext
  * @param {Buffer} key — 32-byte AES key
+ * @param {Buffer} [aad] — optional associated data that was bound at encrypt time
  * @returns {Buffer}
  */
-export function aesDecrypt(ciphertext, key) {
+export function aesDecrypt(ciphertext, key, aad) {
   let offset     = 0;
   const iv       = ciphertext.slice(offset, offset + GCM_IV_BYTES); offset += GCM_IV_BYTES;
   const tag      = ciphertext.slice(offset, offset + GCM_TAG_BYTES); offset += GCM_TAG_BYTES;
   const enc      = ciphertext.slice(offset);
   const decipher = createDecipheriv(ECIES_CIPHER, key, iv);
   decipher.setAuthTag(tag);
+  if (aad) decipher.setAAD(aad);
   return Buffer.concat([decipher.update(enc), decipher.final()]);
 }
 
@@ -351,11 +384,7 @@ function exportRawPublicKey(keyObject) {
 
 /** Export the raw private key scalar from a KeyObject for use with ECDH. */
 function exportRawPrivateKey(keyObject) {
-  const der = keyObject.export({ type: 'pkcs8', format: 'der' });
-  // PKCS8 for P-256: skip ASN.1 header (typically 36–38 bytes) to get the 32-byte scalar
-  // The last 32 bytes of the SEC1 ECPrivateKey inside PKCS8 is the scalar.
-  // We locate it by finding the OCTET STRING containing the EC key.
-  // Reliable approach: re-create ECDH and import via JWK.
+  // Export as JWK and decode the base64url-encoded 'd' field (the raw scalar).
   const jwk = keyObject.export({ format: 'jwk' });
   return Buffer.from(jwk.d, 'base64url');
 }
